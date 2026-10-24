@@ -1,0 +1,18 @@
+{
+  "name": "netcode-rft",
+  "version": "1.0.0",
+  "description": "Network-Coding-Based Reliable File Transfer over UDP",
+  "scripts": {
+    "setup": "bash scripts/setup.sh",
+    "build": "wsl bash -c \"cd /mnt/f/CN_project/netcode-rft/engine && make all\" && cd ui && npm run build",
+    "build:engine": "wsl bash -c \"cd /mnt/f/CN_project/netcode-rft/engine && make all\"",
+    "build:ui": "cd ui && npm run build",
+    "test": "npm run test:backend && npm run test:engine && npm run test:live",
+    "test:backend": "cd backend && npm test",
+    "test:engine": "wsl bash -c \"cd /mnt/f/CN_project/netcode-rft/engine && make test\"",
+    "test:live": "wsl bash -c \"cd /mnt/f/CN_project/netcode-rft && bash scripts/test_live_transfers.sh\"",
+    "start:backend": "cd backend && npm start",
+    "start:ui": "cd ui && npm run dev",
+    "run": "bash scripts/run.sh"
+  }
+}
