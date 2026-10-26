@@ -42,3 +42,12 @@ storage/*.bin*
 # Results temporary test artifacts
 results/*.out
 results/*.tmp
+
+# Generated reconstruction outputs
+*.reconstructed
+results/*_recon.bin
+results/*_reconstructed.bin
+results/*_received.bin
+
+# Generated NS-3 test input binaries
+results/audit_input.bin
