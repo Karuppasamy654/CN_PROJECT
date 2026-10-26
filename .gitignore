@@ -43,3 +43,7 @@ netcode-rft/uploads/*
 !netcode-rft/uploads/.gitkeep
 netcode-rft/downloads/*
 !netcode-rft/downloads/.gitkeep
+
+# NetCode-RFT generated runtime uploads
+/netcode-rft/backend/uploads/*
+!/netcode-rft/backend/uploads/.gitkeep
