@@ -347,8 +347,8 @@ test('Criterion 11: Only a fully reconstructed, size-checked, hash-verified outp
     const dlBuf = Buffer.from(await dlRes.arrayBuffer());
     assert.strictEqual(crypto.createHash('sha256').update(dlBuf).digest('hex'), sha);
 
-    fs.unlinkSync(dummyPath);
-    fs.unlinkSync(outPath);
+    try { fs.unlinkSync(dummyPath); } catch (e) {}
+    try { fs.unlinkSync(outPath); } catch (e) {}
   } finally {
     server.close();
   }

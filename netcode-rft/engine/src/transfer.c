@@ -11,6 +11,20 @@
 #include <sys/time.h>
 #include <errno.h>
 
+static void format_coeffs(const uint8_t *coeffs, uint8_t K, char *out, size_t out_sz) {
+    if (!coeffs || K == 0) {
+        snprintf(out, out_sz, "[]");
+        return;
+    }
+    snprintf(out, out_sz, "[");
+    for (int i = 0; i < K; i++) {
+        char num[16];
+        snprintf(num, sizeof(num), "%u%s", coeffs[i], (i < K - 1) ? "," : "");
+        strncat(out, num, out_sz - strlen(out) - 1);
+    }
+    strncat(out, "]", out_sz - strlen(out) - 1);
+}
+
 int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
                    const char *filepath, size_t block_size, uint8_t K,
                    uint8_t redundancy, impairment_config_t *impair,
@@ -37,10 +51,13 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
     tv.tv_usec = 100 * 1000; /* 100ms timeout for feedback */
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    size_t total_blocks = (file_sz + block_size - 1) / block_size;
-    if (total_blocks == 0) total_blocks = 1;
-    size_t total_gens = (total_blocks + K - 1) / K;
-    if (total_gens == 0) total_gens = 1;
+    /* Mathematically correct block and generation counts */
+    size_t total_blocks = 0;
+    size_t total_gens = 0;
+    if (file_sz > 0) {
+        total_blocks = ((size_t)file_sz + block_size - 1) / block_size;
+        total_gens = (total_blocks + K - 1) / K;
+    }
 
     uint16_t global_seq = 0;
     uint8_t tx_buf[2048];
@@ -55,23 +72,35 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
         hs_init.header.version = NETCODE_VERSION;
         hs_init.header.type = PKT_TYPE_HANDSHAKE;
         hs_init.header.seq_id = 1; /* TRANSFER_INIT */
+        hs_init.header.crc32 = (uint32_t)file_sz;
+        hs_init.header.block_id = (uint16_t)total_blocks;
         hs_init.header.payload_len = 0;
         size_t hs_len = 0;
-        protocol_serialize_packet(&hs_init, tx_buf, sizeof(tx_buf), &hs_len, K);
+        protocol_serialize_packet(&hs_init, tx_buf, sizeof(tx_buf), &hs_len, 0);
 
         bool ready = false;
         for (int attempt = 0; attempt < 8 && !ready; attempt++) {
             event_emit_handshake(1, "TRANSFER_INIT", "sender_to_receiver", "1. Sender -> Receiver: TRANSFER_INIT");
-            sendto(sock, tx_buf, hs_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            ssize_t sent = sendto(sock, tx_buf, hs_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            if (sent > 0) {
+                printf("[HANDSHAKE-TX] Sent TRANSFER_INIT (len=%zd) -> %s:%d (attempt %d/8)\n",
+                       sent, dest_ip, dest_port, attempt + 1);
+                fflush(stdout);
+            }
 
             struct sockaddr_in from_addr;
             socklen_t from_len = sizeof(from_addr);
             ssize_t n = recvfrom(sock, rx_buf, sizeof(rx_buf), 0, (struct sockaddr *)&from_addr, &from_len);
             if (n > 0) {
                 netcode_packet_t hs_reply;
-                if (protocol_parse_packet(rx_buf, (size_t)n, &hs_reply, K) == 0 &&
+                if (protocol_parse_packet(rx_buf, (size_t)n, &hs_reply, 0) == 0 &&
                     hs_reply.header.type == PKT_TYPE_HANDSHAKE &&
                     hs_reply.header.seq_id == 2) {
+                    char rip[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &from_addr.sin_addr, rip, sizeof(rip));
+                    printf("[HANDSHAKE-RX] Received TRANSFER_READY (len=%zd) <- %s:%d\n",
+                           n, rip, ntohs(from_addr.sin_port));
+                    fflush(stdout);
                     ready = true;
                     break;
                 }
@@ -88,19 +117,50 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
             hs_start.header.type = PKT_TYPE_HANDSHAKE;
             hs_start.header.seq_id = 3; /* TRANSFER_START */
             hs_start.header.payload_len = 0;
-            protocol_serialize_packet(&hs_start, tx_buf, sizeof(tx_buf), &hs_len, K);
+            protocol_serialize_packet(&hs_start, tx_buf, sizeof(tx_buf), &hs_len, 0);
             event_emit_handshake(3, "TRANSFER_START", "sender_to_receiver", "3. Sender -> Receiver: TRANSFER_START");
-            sendto(sock, tx_buf, hs_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            ssize_t sent = sendto(sock, tx_buf, hs_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            if (sent > 0) {
+                printf("[HANDSHAKE-TX] Sent TRANSFER_START (len=%zd) -> %s:%d (Handshake Complete)\n",
+                       sent, dest_ip, dest_port);
+                fflush(stdout);
+            }
             usleep(30000);
         }
+    }
+
+    /* For empty files: transmit ZERO data packets, send FIN, and exit cleanly */
+    if (file_sz == 0 || total_gens == 0) {
+        netcode_packet_t fin_pkt;
+        memset(&fin_pkt, 0, sizeof(fin_pkt));
+        fin_pkt.header.magic[0] = NETCODE_MAGIC_0;
+        fin_pkt.header.magic[1] = NETCODE_MAGIC_1;
+        fin_pkt.header.version = NETCODE_VERSION;
+        fin_pkt.header.type = PKT_TYPE_FIN;
+        fin_pkt.header.seq_id = global_seq++;
+        fin_pkt.header.gen_id = 0;
+        fin_pkt.header.block_id = 0;
+        fin_pkt.header.payload_len = 0;
+        fin_pkt.header.crc32 = 0;
+
+        size_t fin_len = 0;
+        protocol_serialize_packet(&fin_pkt, tx_buf, sizeof(tx_buf), &fin_len, 0);
+        ssize_t sent = sendto(sock, tx_buf, fin_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (sent > 0) {
+            printf("[UDP-TX] Sent FIN packet seq=%u (Empty File) -> %s:%d\n", fin_pkt.header.seq_id, dest_ip, dest_port);
+            fflush(stdout);
+        }
+        fclose(f);
+        return 0;
     }
 
     for (size_t g = 0; g < total_gens; g++) {
         size_t gen_start_block = g * K;
         size_t gen_blocks = (gen_start_block + K <= total_blocks) ? K : (total_blocks - gen_start_block);
+        uint8_t cur_K = (uint8_t)gen_blocks;
 
         rlnc_encoder_t enc;
-        rlnc_encoder_init(&enc, K, block_size);
+        rlnc_encoder_init(&enc, cur_K, block_size);
 
         for (size_t b = 0; b < gen_blocks; b++) {
             uint8_t raw[MAX_PAYLOAD_SIZE];
@@ -128,17 +188,25 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
             pkt.header.crc32 = protocol_crc32(pkt.payload, block_size);
 
             size_t tx_len = 0;
-            protocol_serialize_packet(&pkt, tx_buf, sizeof(tx_buf), &tx_len, K);
+            protocol_serialize_packet(&pkt, tx_buf, sizeof(tx_buf), &tx_len, cur_K);
 
             metrics->packets_sent++;
-            event_emit_packet_transmitted(pkt.header.seq_id, (uint16_t)g, "Systematic", pkt.coeffs, K, block_size, pkt.payload);
+            event_emit_packet_transmitted(pkt.header.seq_id, (uint16_t)g, "Systematic", 1, pkt.coeffs, cur_K, block_size, pkt.payload);
 
             if (impair && impairment_should_drop(impair)) {
                 metrics->packets_dropped++;
-                event_emit_packet_dropped(pkt.header.seq_id, (uint16_t)g, "Loss simulated");
+                event_emit_packet_dropped(pkt.header.seq_id, (uint16_t)g, 1, "Loss simulated");
+                printf("[IMPAIRMENT-DROP] Dropped packet seq=%u gen=%u block=%u (Systematic, loss=%.1f%%)\n",
+                       pkt.header.seq_id, (uint16_t)g, (uint16_t)b, impair->loss_rate * 100.0);
+                fflush(stdout);
             } else {
                 if (impair) impairment_apply_delay(impair);
-                sendto(sock, tx_buf, tx_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                ssize_t sent = sendto(sock, tx_buf, tx_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                if (sent > 0) {
+                    printf("[UDP-TX] [RLNC] Sent pkt seq=%u gen=%u block=%u (Systematic) len=%zd bytes -> %s:%d\n",
+                           pkt.header.seq_id, (uint16_t)g, (uint16_t)b, sent, dest_ip, dest_port);
+                    fflush(stdout);
+                }
             }
             usleep(2000);
         }
@@ -160,18 +228,29 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
             pkt.header.crc32 = protocol_crc32(pkt.payload, block_size);
 
             size_t tx_len = 0;
-            protocol_serialize_packet(&pkt, tx_buf, sizeof(tx_buf), &tx_len, K);
+            protocol_serialize_packet(&pkt, tx_buf, sizeof(tx_buf), &tx_len, cur_K);
+
+            char c_str[128];
+            format_coeffs(pkt.coeffs, cur_K, c_str, sizeof(c_str));
 
             metrics->packets_sent++;
             metrics->coded_packets++;
-            event_emit_packet_transmitted(pkt.header.seq_id, (uint16_t)g, "Mixed", pkt.coeffs, K, block_size, pkt.payload);
+            event_emit_packet_transmitted(pkt.header.seq_id, (uint16_t)g, "Mixed", 1, pkt.coeffs, cur_K, block_size, pkt.payload);
 
             if (impair && impairment_should_drop(impair)) {
                 metrics->packets_dropped++;
-                event_emit_packet_dropped(pkt.header.seq_id, (uint16_t)g, "Loss simulated");
+                event_emit_packet_dropped(pkt.header.seq_id, (uint16_t)g, 1, "Loss simulated");
+                printf("[IMPAIRMENT-DROP] Dropped coded pkt seq=%u gen=%u coeffs=%s (loss=%.1f%%)\n",
+                       pkt.header.seq_id, (uint16_t)g, c_str, impair->loss_rate * 100.0);
+                fflush(stdout);
             } else {
                 if (impair) impairment_apply_delay(impair);
-                sendto(sock, tx_buf, tx_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                ssize_t sent = sendto(sock, tx_buf, tx_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                if (sent > 0) {
+                    printf("[UDP-TX] [RLNC] Sent coded pkt seq=%u gen=%u coeffs=%s len=%zd bytes -> %s:%d\n",
+                           pkt.header.seq_id, (uint16_t)g, c_str, sent, dest_ip, dest_port);
+                    fflush(stdout);
+                }
             }
             usleep(2000);
         }
@@ -180,7 +259,7 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
         bool gen_finished = false;
         int wait_loops = 0;
 
-        int max_wait_loops = (K * 3 > 25) ? (K * 3) : 25;
+        int max_wait_loops = (cur_K * 3 > 25) ? (cur_K * 3) : 25;
         while (!gen_finished && wait_loops < max_wait_loops) {
             struct sockaddr_in from_addr;
             socklen_t from_len = sizeof(from_addr);
@@ -189,8 +268,13 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
             /* Check and drain any pending ACKs */
             while ((n = recvfrom(sock, rx_buf, sizeof(rx_buf), MSG_DONTWAIT, (struct sockaddr *)&from_addr, &from_len)) > 0) {
                 netcode_packet_t ack_pkt;
-                if (protocol_parse_packet(rx_buf, (size_t)n, &ack_pkt, K) == 0) {
+                if (protocol_parse_packet(rx_buf, (size_t)n, &ack_pkt, cur_K) == 0) {
                     if (ack_pkt.header.type == PKT_TYPE_ACK && ack_pkt.header.gen_id == (uint16_t)g) {
+                        char aip[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &from_addr.sin_addr, aip, sizeof(aip));
+                        printf("[UDP-ACK] [RLNC] Received validated ACK for Gen %u <- %s:%d (Complete)\n",
+                               (uint16_t)g, aip, ntohs(from_addr.sin_port));
+                        fflush(stdout);
                         gen_finished = true;
                         break;
                     }
@@ -221,18 +305,29 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
             extra_pkt.header.crc32 = protocol_crc32(extra_pkt.payload, block_size);
 
             size_t tx_len = 0;
-            protocol_serialize_packet(&extra_pkt, tx_buf, sizeof(tx_buf), &tx_len, K);
+            protocol_serialize_packet(&extra_pkt, tx_buf, sizeof(tx_buf), &tx_len, cur_K);
+
+            char c_str[128];
+            format_coeffs(extra_pkt.coeffs, cur_K, c_str, sizeof(c_str));
 
             metrics->packets_sent++;
             metrics->coded_packets++;
-            event_emit_packet_transmitted(extra_pkt.header.seq_id, (uint16_t)g, "Mixed (Retransmit)", extra_pkt.coeffs, K, block_size, extra_pkt.payload);
+            event_emit_packet_transmitted(extra_pkt.header.seq_id, (uint16_t)g, "Mixed (Retransmit)", 2, extra_pkt.coeffs, cur_K, block_size, extra_pkt.payload);
 
             if (impair && impairment_should_drop(impair)) {
                 metrics->packets_dropped++;
-                event_emit_packet_dropped(extra_pkt.header.seq_id, (uint16_t)g, "Loss simulated");
+                event_emit_packet_dropped(extra_pkt.header.seq_id, (uint16_t)g, 2, "Loss simulated");
+                printf("[IMPAIRMENT-DROP] Dropped repair coded pkt seq=%u gen=%u coeffs=%s\n",
+                       extra_pkt.header.seq_id, (uint16_t)g, c_str);
+                fflush(stdout);
             } else {
                 if (impair) impairment_apply_delay(impair);
-                sendto(sock, tx_buf, tx_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                ssize_t sent = sendto(sock, tx_buf, tx_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+                if (sent > 0) {
+                    printf("[UDP-TX] [RLNC] Sent repair coded pkt seq=%u gen=%u coeffs=%s len=%zd bytes -> %s:%d\n",
+                           extra_pkt.header.seq_id, (uint16_t)g, c_str, sent, dest_ip, dest_port);
+                    fflush(stdout);
+                }
             }
 
             wait_loops++;
@@ -261,8 +356,12 @@ int rlnc_send_file(int sock, const char *dest_ip, int dest_port,
         fin_pkt.header.crc32 = 0;
 
         size_t fin_len = 0;
-        protocol_serialize_packet(&fin_pkt, tx_buf, sizeof(tx_buf), &fin_len, K);
-        sendto(sock, tx_buf, fin_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        protocol_serialize_packet(&fin_pkt, tx_buf, sizeof(tx_buf), &fin_len, 0);
+        ssize_t sent = sendto(sock, tx_buf, fin_len, 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+        if (sent > 0 && fin_attempts == 0) {
+            printf("[UDP-TX] Sent FIN packet seq=%u (len=%zd) -> %s:%d\n", fin_pkt.header.seq_id, sent, dest_ip, dest_port);
+            fflush(stdout);
+        }
         usleep(10000);
     }
 
@@ -285,17 +384,24 @@ int rlnc_receive_file(int sock, const char *out_filepath,
     tv.tv_usec = 0;
     setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    size_t total_blocks = (original_file_size + block_size - 1) / block_size;
-    if (total_blocks == 0) total_blocks = 1;
-    size_t total_gens = (total_blocks + K - 1) / K;
-    if (total_gens == 0) total_gens = 1;
+    size_t total_blocks = 0;
+    size_t total_gens = 0;
+    if (original_file_size > 0) {
+        total_blocks = (original_file_size + block_size - 1) / block_size;
+        total_gens = (total_blocks + K - 1) / K;
+    }
 
     rlnc_decoder_t decoders[MAX_SUPPORTED_GENS];
     bool gen_decoded[MAX_SUPPORTED_GENS];
+    uint8_t gen_k[MAX_SUPPORTED_GENS];
     memset(gen_decoded, 0, sizeof(gen_decoded));
+    memset(gen_k, 0, sizeof(gen_k));
 
     for (size_t g = 0; g < total_gens && g < MAX_SUPPORTED_GENS; g++) {
-        rlnc_decoder_init(&decoders[g], K, block_size);
+        size_t gen_start_block = g * K;
+        size_t gen_blocks = (gen_start_block + K <= total_blocks) ? K : (total_blocks - gen_start_block);
+        gen_k[g] = (uint8_t)gen_blocks;
+        rlnc_decoder_init(&decoders[g], gen_k[g], block_size);
     }
 
     uint8_t rx_buf[2048];
@@ -314,8 +420,25 @@ int rlnc_receive_file(int sock, const char *out_filepath,
             if (n <= 0) break;
 
             netcode_packet_t hs_pkt;
-            if (protocol_parse_packet(hs_buf, (size_t)n, &hs_pkt, K) == 0) {
+            if (protocol_parse_packet(hs_buf, (size_t)n, &hs_pkt, 0) == 0) {
+                char sip[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &sender_addr.sin_addr, sip, sizeof(sip));
+                int sport = ntohs(sender_addr.sin_port);
+
                 if (hs_pkt.header.type == PKT_TYPE_HANDSHAKE && hs_pkt.header.seq_id == 1) {
+                    if (original_file_size == 0 && hs_pkt.header.crc32 > 0) {
+                        original_file_size = (size_t)hs_pkt.header.crc32;
+                        total_blocks = (original_file_size + block_size - 1) / block_size;
+                        total_gens = (total_blocks + K - 1) / K;
+                        for (size_t g = 0; g < total_gens && g < MAX_SUPPORTED_GENS; g++) {
+                            size_t gen_start_block = g * K;
+                            size_t gen_blocks = (gen_start_block + K <= total_blocks) ? K : (total_blocks - gen_start_block);
+                            gen_k[g] = (uint8_t)gen_blocks;
+                            rlnc_decoder_init(&decoders[g], gen_k[g], block_size);
+                        }
+                    }
+                    printf("[HANDSHAKE-RX] Received TRANSFER_INIT (len=%zd, size=%zu) <- %s:%d\n", n, original_file_size, sip, sport);
+                    fflush(stdout);
                     event_emit_handshake(2, "TRANSFER_READY", "receiver_to_sender", "2. Receiver -> Sender: TRANSFER_READY");
 
                     netcode_packet_t hs_ready;
@@ -326,25 +449,40 @@ int rlnc_receive_file(int sock, const char *out_filepath,
                     hs_ready.header.type = PKT_TYPE_HANDSHAKE;
                     hs_ready.header.seq_id = 2; /* TRANSFER_READY */
                     size_t rep_len = 0;
-                    protocol_serialize_packet(&hs_ready, hs_buf, sizeof(hs_buf), &rep_len, K);
-                    sendto(sock, hs_buf, rep_len, 0, (struct sockaddr *)&sender_addr, sender_len);
+                    protocol_serialize_packet(&hs_ready, hs_buf, sizeof(hs_buf), &rep_len, 0);
+                    ssize_t sent = sendto(sock, hs_buf, rep_len, 0, (struct sockaddr *)&sender_addr, sender_len);
+                    if (sent > 0) {
+                        printf("[HANDSHAKE-TX] Sent TRANSFER_READY (len=%zd) -> %s:%d\n", sent, sip, sport);
+                        fflush(stdout);
+                    }
 
                     // Wait for TRANSFER_START
                     ssize_t n2 = recvfrom(sock, hs_buf, sizeof(hs_buf), 0, (struct sockaddr *)&sender_addr, &sender_len);
                     if (n2 > 0) {
                         netcode_packet_t hs_start;
-                        if (protocol_parse_packet(hs_buf, (size_t)n2, &hs_start, K) == 0 &&
+                        if (protocol_parse_packet(hs_buf, (size_t)n2, &hs_start, 0) == 0 &&
                             hs_start.header.type == PKT_TYPE_HANDSHAKE &&
                             hs_start.header.seq_id == 3) {
+                            printf("[HANDSHAKE-RX] Received TRANSFER_START (len=%zd) <- %s:%d (Handshake Established)\n", n2, sip, sport);
+                            fflush(stdout);
                             event_emit_handshake(4, "INITIALIZATION_COMPLETE", "all", "Handshake Established");
                             init_done = true;
                         }
                     }
-                } else if (hs_pkt.header.type == PKT_TYPE_DATA_RLNC) {
+                } else if (hs_pkt.header.type == PKT_TYPE_DATA_RLNC || hs_pkt.header.type == PKT_TYPE_FIN) {
                     init_done = true;
                 }
             }
         }
+    }
+
+    /* For empty file: zero data blocks to receive, flush empty file, emit progress, and exit */
+    if (original_file_size == 0 || total_gens == 0) {
+        event_emit_reconstruction_progress(0, 0, 100);
+        fflush(out);
+        (void)!ftruncate(fileno(out), 0);
+        fclose(out);
+        return 0;
     }
 
     while (1) {
@@ -356,12 +494,26 @@ int rlnc_receive_file(int sock, const char *out_filepath,
             break;
         }
 
+        const netcode_header_t *hdr = (const netcode_header_t *)rx_buf;
+        if ((size_t)n < sizeof(netcode_header_t)) continue;
+
+        uint16_t g = hdr->gen_id;
+        uint8_t cur_K = (g < total_gens) ? gen_k[g] : K;
+
         netcode_packet_t pkt;
-        if (protocol_parse_packet(rx_buf, (size_t)n, &pkt, K) != 0) {
+        if (protocol_parse_packet(rx_buf, (size_t)n, &pkt, cur_K) != 0) {
             continue;
         }
 
+        char sip[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &sender_addr.sin_addr, sip, sizeof(sip));
+        int sport = ntohs(sender_addr.sin_port);
+
         if (pkt.header.type == PKT_TYPE_FIN) {
+            printf("[UDP-RX] Received FIN packet seq=%u gen=%u (len=%zd) <- %s:%d\n",
+                   pkt.header.seq_id, pkt.header.gen_id, n, sip, sport);
+            fflush(stdout);
+
             /* Reply with FIN-ACK */
             netcode_packet_t ack;
             memset(&ack, 0, sizeof(ack));
@@ -372,8 +524,12 @@ int rlnc_receive_file(int sock, const char *out_filepath,
             ack.header.seq_id = pkt.header.seq_id;
             ack.header.gen_id = pkt.header.gen_id;
             size_t ack_len = 0;
-            protocol_serialize_packet(&ack, tx_buf, sizeof(tx_buf), &ack_len, K);
-            sendto(sock, tx_buf, ack_len, 0, (struct sockaddr *)&sender_addr, sender_len);
+            protocol_serialize_packet(&ack, tx_buf, sizeof(tx_buf), &ack_len, 0);
+            ssize_t sent = sendto(sock, tx_buf, ack_len, 0, (struct sockaddr *)&sender_addr, sender_len);
+            if (sent > 0) {
+                printf("[UDP-ACK] Sent FIN-ACK seq=%u (len=%zd) -> %s:%d\n", ack.header.seq_id, sent, sip, sport);
+                fflush(stdout);
+            }
             break;
         }
 
@@ -381,28 +537,43 @@ int rlnc_receive_file(int sock, const char *out_filepath,
             continue;
         }
 
-        uint16_t g = pkt.header.gen_id;
         if (g >= total_gens) continue;
 
+        char c_str[128];
+        format_coeffs(pkt.coeffs, cur_K, c_str, sizeof(c_str));
+
         metrics->packets_received++;
-        event_emit_packet_received(pkt.header.seq_id, g, pkt.header.payload_len, pkt.coeffs, K, pkt.payload);
+        event_emit_packet_received(pkt.header.seq_id, g, pkt.header.payload_len, pkt.coeffs, cur_K, pkt.payload);
+
+        printf("[UDP-RX] [RLNC] Received pkt seq=%u gen=%u coeffs=%s len=%zd bytes <- %s:%d\n",
+               pkt.header.seq_id, g, c_str, n, sip, sport);
+        fflush(stdout);
 
         if (!gen_decoded[g]) {
+            int prev_rank = decoders[g].rank;
             bool innovative = rlnc_decoder_add_packet(&decoders[g], pkt.coeffs, pkt.payload, g);
             if (innovative) {
                 metrics->independent_packets++;
+                printf("[RLNC-DECODER] Gen %u: Innovative packet (coeffs=%s). Rank: %d -> %d / %d\n",
+                       g, c_str, prev_rank, decoders[g].rank, cur_K);
             } else {
                 metrics->dependent_packets++;
+                printf("[RLNC-DECODER] Gen %u: Redundant packet (coeffs=%s). Rank unchanged: %d / %d\n",
+                       g, c_str, decoders[g].rank, cur_K);
             }
+            fflush(stdout);
 
-            event_emit_decoder_matrix_update(g, decoders[g].rank, K, innovative);
+            event_emit_decoder_matrix_update(g, decoders[g].rank, cur_K, innovative);
 
             if (rlnc_decoder_is_complete(&decoders[g])) {
                 gen_decoded[g] = true;
+                printf("[RLNC-DECODER] Gen %u: FULL RANK ACHIEVED (%d/%d)! Decoding all %d source blocks via Gaussian Elimination.\n",
+                       g, decoders[g].rank, cur_K, cur_K);
+                fflush(stdout);
 
                 /* Write decoded blocks of this generation to out file */
                 size_t gen_start_block = g * K;
-                size_t gen_blocks = (gen_start_block + K <= total_blocks) ? K : (total_blocks - gen_start_block);
+                size_t gen_blocks = gen_k[g];
 
                 for (size_t b = 0; b < gen_blocks; b++) {
                     uint8_t out_blk[MAX_PAYLOAD_SIZE];
@@ -437,12 +608,18 @@ int rlnc_receive_file(int sock, const char *out_filepath,
             ack.header.seq_id = pkt.header.seq_id;
             ack.header.gen_id = g;
             size_t ack_len = 0;
-            protocol_serialize_packet(&ack, tx_buf, sizeof(tx_buf), &ack_len, K);
+            protocol_serialize_packet(&ack, tx_buf, sizeof(tx_buf), &ack_len, cur_K);
 
             if (impair && impairment_should_drop(impair)) {
                 /* Drop ACK in simulation */
+                printf("[IMPAIRMENT-DROP] Dropped Gen %u completion ACK in simulation\n", g);
+                fflush(stdout);
             } else {
-                sendto(sock, tx_buf, ack_len, 0, (struct sockaddr *)&sender_addr, sender_len);
+                ssize_t sent = sendto(sock, tx_buf, ack_len, 0, (struct sockaddr *)&sender_addr, sender_len);
+                if (sent > 0) {
+                    printf("[UDP-ACK] [RLNC] Sent Gen %u completion ACK (len=%zd) -> %s:%d\n", g, sent, sip, sport);
+                    fflush(stdout);
+                }
             }
         }
     }
@@ -457,7 +634,7 @@ int rlnc_receive_file(int sock, const char *out_filepath,
 
     fflush(out);
     if (ftruncate(fileno(out), original_file_size) != 0) {
-        /* Truncate failed or not supported on handle */
+        /* Truncate handled */
     }
     fclose(out);
 

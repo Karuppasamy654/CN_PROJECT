@@ -29,10 +29,17 @@ const upload = multer({
 
 function computeFileSHA256(filePath) {
   return new Promise((resolve, reject) => {
+    if (!fs.existsSync(filePath)) {
+      return reject(new Error(`File not found at path: ${filePath}`));
+    }
     const hash = crypto.createHash('sha256');
+    let bytesRead = 0;
     const stream = fs.createReadStream(filePath);
-    stream.on('data', data => hash.update(data));
-    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('data', data => {
+      bytesRead += data.length;
+      hash.update(data);
+    });
+    stream.on('end', () => resolve({ hash: hash.digest('hex'), bytesRead }));
     stream.on('error', err => reject(err));
   });
 }
@@ -52,6 +59,8 @@ router.post('/transfers', upload.single('file'), async (req, res) => {
       blockSize = '1024',
       K = '4',
       redundancy = '2',
+      seed = '1',
+      autoNetAnim = 'true',
     } = req.body;
 
     const normalizedProtocol = protocol.toLowerCase();
@@ -84,9 +93,15 @@ router.post('/transfers', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Redundancy must be between 0 and 32' });
     }
 
+    const parsedSeed = parseInt(seed, 10);
+    const validSeed = (!isNaN(parsedSeed) && parsedSeed > 1) ? parsedSeed : (Math.floor(Math.random() * 65535) + 2);
+
     const filePath = req.file.path;
     const stats = fs.statSync(filePath);
-    const fileSha256 = await computeFileSHA256(filePath);
+    const { hash: fileSha256, bytesRead: uploadBytesRead } = await computeFileSHA256(filePath);
+    if (stats.size !== uploadBytesRead) {
+      return res.status(400).json({ error: `File stat size (${stats.size}) does not match bytes read during hashing (${uploadBytesRead})` });
+    }
 
     const transferId = 'transfer-' + Date.now();
     const transfer = {
@@ -102,6 +117,8 @@ router.post('/transfers', upload.single('file'), async (req, res) => {
       blockSize: parsedBlockSize,
       K: parsedK,
       redundancy: parsedRedundancy,
+      seed: validSeed,
+      autoNetAnim: autoNetAnim === 'true' || autoNetAnim === true,
     };
 
     const saved = store.createTransfer(transfer);
@@ -137,6 +154,20 @@ router.post('/transfers/:id/cancel', (req, res) => {
   const success = engineManager.cancelTransfer(req.params.id);
   res.json({ success });
 });
+
+// 4b. POST /api/transfers/:id/netanim (Launch NetAnim desktop viewer for this transfer's trace)
+router.post('/transfers/:id/netanim', (req, res) => {
+  const t = store.getTransfer(req.params.id);
+  if (!t) return res.status(404).json({ error: 'Transfer not found' });
+  const tracePath = t.tracePath || `/mnt/f/CN_project/netcode-rft/results/trace_${t.id}_${(t.protocol || 'rlnc').toLowerCase()}_loss${t.lossRate}.xml`;
+  const success = engineManager.launchNetAnim(tracePath);
+  res.json({
+    success,
+    message: success ? 'NetAnim desktop viewer opened with transfer trace' : 'Failed to launch NetAnim desktop',
+    tracePath,
+  });
+});
+
 
 // 5. GET /api/transfers/:id/events
 router.get('/transfers/:id/events', (req, res) => {
@@ -232,8 +263,52 @@ router.get('/transfers/:id/verification', async (req, res) => {
     });
   }
 
-  const origSha = t.fileSha256;
-  const reconSha = await computeFileSHA256(outPath);
+  const { hash: origSha, bytesRead: origBytesRead } = await computeFileSHA256(t.filePath);
+  const { hash: reconSha, bytesRead: reconBytesRead } = await computeFileSHA256(outPath);
+
+  if (origBytesRead !== origStats.size || reconBytesRead !== reconStats.size) {
+    return res.json({
+      verified: false,
+      state: 'FAILED',
+      message: `Transfer failed — Byte read count mismatch during hashing (orig read ${origBytesRead} of ${origStats.size}, recon read ${reconBytesRead} of ${reconStats.size})`,
+      origSize: origStats.size,
+      reconSize: reconStats.size,
+      origBytesRead,
+      reconBytesRead,
+      byteEqual: false,
+    });
+  }
+
+  const EMPTY_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+  if (origStats.size > 0 && (origSha === EMPTY_SHA || reconSha === EMPTY_SHA || t.fileSha256 === EMPTY_SHA)) {
+    return res.json({
+      verified: false,
+      state: 'FAILED',
+      message: 'Transfer failed — Non-empty file evaluated to empty-file SHA-256 hash',
+      origSha,
+      reconSha,
+      origSize: origStats.size,
+      reconSize: reconStats.size,
+      origBytesRead,
+      reconBytesRead,
+      byteEqual: false,
+    });
+  }
+
+  if (t.fileSha256 && t.fileSha256 !== origSha) {
+    return res.json({
+      verified: false,
+      state: 'FAILED',
+      message: 'Transfer failed — Upload SHA-256 metadata does not match source file on disk',
+      origSha,
+      reconSha,
+      origSize: origStats.size,
+      reconSize: reconStats.size,
+      origBytesRead,
+      reconBytesRead,
+      byteEqual: false,
+    });
+  }
 
   if (origSha !== reconSha) {
     return res.json({
@@ -244,6 +319,8 @@ router.get('/transfers/:id/verification', async (req, res) => {
       reconSha,
       origSize: origStats.size,
       reconSize: reconStats.size,
+      origBytesRead,
+      reconBytesRead,
       byteEqual: false,
     });
   }
@@ -257,6 +334,8 @@ router.get('/transfers/:id/verification', async (req, res) => {
     reconSha,
     origSize: origStats.size,
     reconSize: reconStats.size,
+    origBytesRead,
+    reconBytesRead,
     byteEqual: true,
   });
 });
@@ -292,4 +371,77 @@ router.get('/experiments', (req, res) => {
   res.json(store.getExperiments());
 });
 
+// 10b. GET /api/history (Transfer and experiment history for visualizer and dashboard)
+router.get('/history', (req, res) => {
+  const transfers = store.getAllTransfers().map(t => ({
+    id: t.id,
+    transfer_id: t.id,
+    filename: t.filename,
+    mode: t.protocol,
+    protocol: t.protocol,
+    loss_rate: t.lossRate ? (t.lossRate > 1 ? t.lossRate / 100 : t.lossRate) : 0,
+    lossRate: t.lossRate,
+    seed: t.seed,
+    fileSize: t.fileSize,
+    status: t.status,
+    eventsCount: t.eventsCount || 0,
+    createdAt: t.createdAt,
+    timestamp: t.createdAt,
+  })).reverse();
+
+  const experiments = store.getExperiments();
+
+  res.json({
+    experiments: transfers.length > 0 ? transfers : experiments,
+    transfers,
+  });
+});
+
+// 11. GET /api/batch-results (Fetch recorded multi-loss NS-3 comparison matrix)
+router.get('/batch-results', (req, res) => {
+  const { RESULTS_DIR } = require('../config');
+  const jsonPath = path.join(RESULTS_DIR, 'batch_comparison_results.json');
+  if (fs.existsSync(jsonPath)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+      return res.json({ available: true, results: data });
+    } catch (e) {
+      return res.status(500).json({ error: 'Failed to parse batch results: ' + e.message });
+    }
+  }
+  return res.json({ available: false, results: [] });
+});
+
+// 12. GET /api/traces (List all generated NetAnim XML traces)
+router.get('/traces', (req, res) => {
+  const { RESULTS_DIR } = require('../config');
+  if (!fs.existsSync(RESULTS_DIR)) {
+    return res.json({ traces: [] });
+  }
+  const files = fs.readdirSync(RESULTS_DIR)
+    .filter(f => f.endsWith('.xml'))
+    .map(f => {
+      const full = path.join(RESULTS_DIR, f);
+      const st = fs.statSync(full);
+      return {
+        filename: f,
+        path: full,
+        wslPath: `/mnt/f/CN_project/netcode-rft/results/${f}`,
+        sizeBytes: st.size,
+        modified: st.mtime,
+      };
+    })
+    .sort((a, b) => b.modified - a.modified);
+
+  res.json({ traces: files });
+});
+
+// 13. POST /api/netanim/launch (Launch desktop NetAnim viewer for any trace)
+router.post('/netanim/launch', (req, res) => {
+  const { tracePath } = req.body || {};
+  const launched = engineManager.launchNetAnim(tracePath);
+  res.json({ success: launched, tracePath });
+});
+
 module.exports = router;
+

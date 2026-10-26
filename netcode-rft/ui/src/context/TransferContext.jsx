@@ -110,10 +110,34 @@ export function TransferProvider({ children }) {
     });
     socketRef.current = socket;
 
+    const isMatchingTransfer = (id1, id2) => {
+      if (!id1 || !id2) return true;
+      const s1 = String(id1);
+      const s2 = String(id2);
+      if (s1 === s2) return true;
+      if (s1.includes(s2) || s2.includes(s1)) return true;
+      const d1 = s1.replace(/\D/g, '');
+      const d2 = s2.replace(/\D/g, '');
+      return d1.length > 0 && d2.length > 0 && (d1 === d2 || d1.includes(d2) || d2.includes(d1));
+    };
+
+    socket.on('initial_events', (evList) => {
+      if (Array.isArray(evList) && evList.length > 0) {
+        setEvents((prev) => {
+          if (prev.length >= evList.length) return prev;
+          for (const ev of evList) {
+            const key = ev.event_id || `${ev.type}-${ev.seq_id ?? ''}-${ev.gen_id ?? ''}-${ev.step ?? ''}-${ev.time ?? ''}`;
+            seenEventKeysRef.current.add(key);
+          }
+          return evList;
+        });
+      }
+    });
+
     socket.on('transfer_event', (event) => {
       // Ignore events for stale or different transfers
       const currentActiveId = activeTransferIdRef.current;
-      if (currentActiveId && event.transfer_id && event.transfer_id !== currentActiveId) {
+      if (currentActiveId && event.transfer_id && !isMatchingTransfer(event.transfer_id, currentActiveId)) {
         return;
       }
 
@@ -142,7 +166,7 @@ export function TransferProvider({ children }) {
               : current
           );
         }
-      } else if (event.type === 'packet_received') {
+      } else if (event.type === 'packet_received' || event.type === 'packet_transmitted' || event.type === 'packet_sent') {
         setTransferLifecycle((current) => {
           if (current === TRANSFER_LIFECYCLE.IDLE || current === TRANSFER_LIFECYCLE.INITIALIZING) {
             return TRANSFER_LIFECYCLE.TRANSFERRING;
@@ -178,7 +202,7 @@ export function TransferProvider({ children }) {
 
     socket.on('metrics', (m) => {
       const currentActiveId = activeTransferIdRef.current;
-      if (currentActiveId && m.transfer_id && m.transfer_id !== currentActiveId) {
+      if (currentActiveId && m.transfer_id && !isMatchingTransfer(m.transfer_id, currentActiveId)) {
         return;
       }
       setMetrics(m);
@@ -186,7 +210,7 @@ export function TransferProvider({ children }) {
 
     socket.on('status', (s) => {
       const currentActiveId = activeTransferIdRef.current;
-      if (currentActiveId && s.transferId && s.transferId !== currentActiveId) {
+      if (currentActiveId && s.transferId && !isMatchingTransfer(s.transferId, currentActiveId)) {
         return;
       }
       setTransfer((prev) => prev ? { ...prev, status: s.status } : null);
@@ -199,6 +223,26 @@ export function TransferProvider({ children }) {
         setTransferLifecycle(TRANSFER_LIFECYCLE.VERIFYING);
         const currentTransferId = s.transferId || activeTransferIdRef.current;
         if (currentTransferId) {
+          // Sync all events and metrics directly from API in case WebSocket missed any
+          fetch(`/api/transfers/${currentTransferId}/events`)
+            .then(res => res.json())
+            .then(evData => {
+              const evList = Array.isArray(evData) ? evData : (evData.events || []);
+              if (evList.length > 0) {
+                setEvents(prev => prev.length >= evList.length ? prev : evList);
+              }
+            })
+            .catch(() => {});
+
+          fetch(`/api/transfers/${currentTransferId}/metrics`)
+            .then(res => res.json())
+            .then(mData => {
+              if (mData && mData.protocol) {
+                setMetrics(mData);
+              }
+            })
+            .catch(() => {});
+
           fetch(`/api/transfers/${currentTransferId}/verification`)
             .then(res => res.json())
             .then(data => {
@@ -375,7 +419,15 @@ export function TransferProvider({ children }) {
 
     // Filter relevant events for the active transfer
     const currentId = transfer?.id || activeTransferIdRef.current;
-    const transferEvents = events.filter(e => !currentId || !e.transfer_id || e.transfer_id === currentId);
+    const transferEvents = events.filter(e => {
+      if (!currentId || !e.transfer_id) return true;
+      const s1 = String(currentId);
+      const s2 = String(e.transfer_id);
+      if (s1 === s2 || s1.includes(s2) || s2.includes(s1)) return true;
+      const d1 = s1.replace(/\D/g, '');
+      const d2 = s2.replace(/\D/g, '');
+      return d1.length > 0 && d2.length > 0 && (d1 === d2 || d1.includes(d2) || d2.includes(d1));
+    });
 
     // Deduplicate events locally in case state was initialized with repeated items
     const seenLocalKeys = new Set();
@@ -388,9 +440,9 @@ export function TransferProvider({ children }) {
       }
     }
 
-    const txEvents = uniqueEvents.filter(e => e.type === 'packet_transmitted');
+    const txEvents = uniqueEvents.filter(e => e.type === 'packet_transmitted' || e.type === 'packet_sent');
     const rxEvents = uniqueEvents.filter(e => e.type === 'packet_received');
-    const dropEvents = uniqueEvents.filter(e => e.type === 'packet_dropped');
+    const dropEvents = uniqueEvents.filter(e => e.type === 'packet_dropped' || e.type === 'phy_drop');
     const reconEvents = uniqueEvents.filter(e => e.type === 'reconstruction_progress');
     const matrixEvents = uniqueEvents.filter(e => e.type === 'decoder_matrix_update');
     const rudpRetransEvents = uniqueEvents.filter(e => e.type === 'rudp_retransmit');
@@ -467,8 +519,12 @@ export function TransferProvider({ children }) {
 
     // 6. Planned configuration vs actual
     const isConnected = latestHandshakeStep >= 4 || (transferLifecycle !== TRANSFER_LIFECYCLE.IDLE && transferLifecycle !== TRANSFER_LIFECYCLE.INITIALIZING);
-    const expectedBlocks = isConnected && transfer?.fileSize ? Math.ceil(transfer.fileSize / (transfer?.blockSize || 1024)) : null;
-    const expectedGenerations = isConnected && expectedBlocks ? Math.ceil(expectedBlocks / (transfer?.K || 4)) : null;
+    const expectedBlocks = isConnected && transfer?.fileSize !== undefined && transfer?.fileSize !== null
+      ? (transfer.fileSize === 0 ? 0 : Math.ceil(transfer.fileSize / (transfer?.blockSize || 1024)))
+      : null;
+    const expectedGenerations = isConnected && expectedBlocks !== null
+      ? (expectedBlocks === 0 ? 0 : Math.ceil(expectedBlocks / (transfer?.K || 4)))
+      : null;
 
     // 7. Time and Throughput (Live measurement while active, frozen upon verified completion)
     const isCompletedStage = (transferLifecycle === TRANSFER_LIFECYCLE.COMPLETED && isVerified);

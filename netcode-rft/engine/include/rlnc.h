@@ -23,6 +23,7 @@ typedef struct {
     uint32_t dependent_count;
 } rlnc_decoder_t;
 
+void rlnc_set_seed(uint32_t seed);
 void rlnc_encoder_init(rlnc_encoder_t *enc, uint8_t K, size_t block_size);
 void rlnc_encoder_set_block(rlnc_encoder_t *enc, uint8_t index, const uint8_t *data, size_t len);
 void rlnc_encode_systematic(rlnc_encoder_t *enc, uint8_t index, uint8_t *coeffs_out, uint8_t *payload_out);

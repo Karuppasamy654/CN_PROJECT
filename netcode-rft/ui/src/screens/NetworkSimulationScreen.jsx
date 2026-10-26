@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useTransfer } from '../context/TransferContext';
 import NetworkConduitPanel from '../components/NetworkConduitPanel';
 import PerformanceComparisonTable from '../components/PerformanceComparisonTable';
-import { FileText, CheckCircle2, ShieldCheck, Download, Play, RefreshCw, Cpu } from 'lucide-react';
+import { FileText, CheckCircle2, ShieldCheck, Download, Play, RefreshCw, Cpu, Monitor } from 'lucide-react';
 
 export default function NetworkSimulationScreen() {
   const navigate = useNavigate();
@@ -16,6 +16,7 @@ export default function NetworkSimulationScreen() {
     verification,
     backendReady,
     startTransfer,
+    cancelTransfer,
     pollVerification,
   } = useTransfer();
 
@@ -23,15 +24,25 @@ export default function NetworkSimulationScreen() {
   const [selectedFile, setSelectedFile] = useState(null);
   const [lossRate, setLossRate] = useState('10');
   const [protocol, setProtocol] = useState('rlnc');
+  const [bandwidth, setBandwidth] = useState('5Mbps');
+  const [delayMs, setDelayMs] = useState('20');
+  const [blockSize, setBlockSize] = useState('1024');
+  const [K, setK] = useState('4');
+  const [redundancy, setRedundancy] = useState('2');
+  const [autoNetAnim, setAutoNetAnim] = useState(true);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
 
   // Default sample file name & size for initial visual presentation
   const fileName = selectedFile ? selectedFile.name : (transfer?.filename || 'sample_file.bin');
-  const fileSize = selectedFile
-    ? `${(selectedFile.size / 1024).toFixed(0)} KB`
-    : (transfer?.fileSize ? `${(transfer.fileSize / 1024).toFixed(0)} KB` : '256 KB');
+  const fileSizeBytes = selectedFile
+    ? selectedFile.size
+    : (transfer?.fileSize ? transfer.fileSize : 4096);
+  const fileSize = fileSizeBytes < 1024 * 1024
+    ? `${(fileSizeBytes / 1024).toFixed(1)} KB`
+    : `${(fileSizeBytes / (1024 * 1024)).toFixed(2)} MB`;
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0];
@@ -71,11 +82,13 @@ export default function NetworkSimulationScreen() {
       fd.append('file', fileToUpload);
       fd.append('protocol', protocol);
       fd.append('lossRate', lossRate);
-      fd.append('delayMs', '20');
+      fd.append('delayMs', delayMs);
+      fd.append('bandwidth', bandwidth);
       fd.append('reorder', 'false');
-      fd.append('blockSize', '1024');
-      fd.append('K', '4');
-      fd.append('redundancy', '2');
+      fd.append('blockSize', blockSize);
+      fd.append('K', K);
+      fd.append('redundancy', redundancy);
+      fd.append('autoNetAnim', autoNetAnim ? 'true' : 'false');
 
       await startTransfer(fd);
     } catch (err) {
@@ -100,18 +113,18 @@ export default function NetworkSimulationScreen() {
   const totalExpectedBlocks = receiverState.expectedBlocks;
   const currentK = transfer?.K || 4;
   const totalGenerations = receiverState.expectedGenerations;
-  const sentCount = receiverState.physicalTransmissions;
-  const lostCount = receiverState.droppedPacketCount;
-  const recvCount = receiverState.receivedPacketCount;
+  const sentCount = receiverState.physicalTransmissions || metrics?.data_packets_sent || metrics?.total_sent_packets || 0;
+  const lostCount = receiverState.droppedPacketCount || metrics?.total_phy_drops || (metrics?.data_packets_sent > metrics?.data_packets_received ? metrics.data_packets_sent - metrics.data_packets_received : 0);
+  const recvCount = receiverState.receivedPacketCount || metrics?.data_packets_received || 0;
 
-  const systematicSent = receiverState.systematicSent;
-  const redundancySent = receiverState.redundancySent;
-  const extraRepairSent = receiverState.extraRepairSent;
-  const rudpRetransmitCount = receiverState.rudpRetransmitCount;
+  const systematicSent = receiverState.systematicSent || (protocol === 'rlnc' ? (metrics?.data_packets_sent ? Math.min(metrics.data_packets_sent, totalExpectedBlocks || 4) : 0) : 0);
+  const redundancySent = receiverState.redundancySent || (protocol === 'rlnc' ? (metrics?.total_coded_packets || 0) : 0);
+  const extraRepairSent = receiverState.extraRepairSent || 0;
+  const rudpRetransmitCount = receiverState.rudpRetransmitCount || (protocol === 'rudp' ? (metrics?.total_retransmissions || 0) : 0);
 
-  const transferTime = receiverState.displayDuration;
-  const throughput = receiverState.displayThroughput;
-  const progressPct = receiverState.progressPct;
+  const transferTime = receiverState.displayDuration !== '0.00s' ? receiverState.displayDuration : (metrics?.sim_time_sec ? `${metrics.sim_time_sec.toFixed(3)}s` : '0.00s');
+  const throughput = receiverState.displayThroughput !== '0.00 Kbps' ? receiverState.displayThroughput : (metrics?.goodput_kbps ? `${metrics.goodput_kbps.toFixed(2)} Kbps` : '0.00 Kbps');
+  const progressPct = receiverState.progressPct > 0 ? receiverState.progressPct : (metrics?.integrity_verified ? 100 : 0);
 
   return (
     <div style={{
@@ -152,7 +165,7 @@ export default function NetworkSimulationScreen() {
               background: '#2563eb',
               color: '#fff',
               border: 'none',
-              padding: '7px 18px',
+              padding: '7px 16px',
               borderRadius: '6px',
               fontSize: '0.82rem',
               fontWeight: 700,
@@ -163,25 +176,61 @@ export default function NetworkSimulationScreen() {
             Transfer & Simulation
           </button>
           <button
+            onClick={() => navigate('/comparison')}
+            style={{
+              background: '#1e293b',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              padding: '7px 16px',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            RLNC vs RUDP Comparison
+          </button>
+          <button
+            onClick={() => navigate('/visualizer')}
+            style={{
+              background: '#1e293b',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              padding: '7px 16px',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Packet Visualizer
+          </button>
+          <button
+            onClick={() => navigate('/history')}
+            style={{
+              background: '#1e293b',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              padding: '7px 16px',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Experiment History
+          </button>
+          <button
             onClick={() => navigate('/equations')}
             style={{
               background: '#1e293b',
               color: '#cbd5e1',
               border: '1px solid #334155',
-              padding: '7px 18px',
+              padding: '7px 16px',
               borderRadius: '6px',
               fontSize: '0.82rem',
               fontWeight: 600,
               cursor: 'pointer',
-              transition: 'all 0.2s ease',
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = '#334155';
-              e.currentTarget.style.color = '#fff';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = '#1e293b';
-              e.currentTarget.style.color = '#cbd5e1';
             }}
           >
             Equation Lab
@@ -310,7 +359,7 @@ export default function NetworkSimulationScreen() {
             {/* Simulation Settings Card */}
             <div className="glass-panel" style={{ padding: '16px', background: '#0d1b2e', borderRadius: '10px', border: '1px solid #1e3a5f' }}>
               <h3 style={{ fontSize: '0.85rem', fontWeight: 700, color: '#fff', marginBottom: '12px' }}>
-                Simulation Settings
+                Simulation Settings (NS-3 Engine)
               </h3>
 
               <div style={{ marginBottom: '12px' }}>
@@ -331,16 +380,16 @@ export default function NetworkSimulationScreen() {
                   }}
                 >
                   <option value="0">0% Loss (Clean Channel)</option>
-                  <option value="5">5% Loss</option>
-                  <option value="10">10% Loss</option>
-                  <option value="20">20% Loss</option>
-                  <option value="30">30% Loss</option>
+                  <option value="5">5% Loss (Light Impairment)</option>
+                  <option value="10">10% Loss (Moderate Impairment)</option>
+                  <option value="20">20% Loss (Severe Impairment)</option>
+                  <option value="30">30% Loss (Extreme Impairment)</option>
                 </select>
               </div>
 
-              <div style={{ marginBottom: '16px' }}>
+              <div style={{ marginBottom: '14px' }}>
                 <label style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'block', marginBottom: '8px' }}>
-                  Transfer Method
+                  Transfer Protocol
                 </label>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: '#fff', cursor: 'pointer' }}>
@@ -351,7 +400,9 @@ export default function NetworkSimulationScreen() {
                       checked={protocol === 'rlnc'}
                       onChange={() => setProtocol('rlnc')}
                     />
-                    <span>Network Coding (RLNC)</span>
+                    <span style={{ color: protocol === 'rlnc' ? '#38bdf8' : '#cbd5e1', fontWeight: 600 }}>
+                      Network Coding (RLNC / GF(256))
+                    </span>
                   </label>
                   <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.78rem', color: '#fff', cursor: 'pointer' }}>
                     <input
@@ -361,30 +412,222 @@ export default function NetworkSimulationScreen() {
                       checked={protocol === 'rudp'}
                       onChange={() => setProtocol('rudp')}
                     />
-                    <span>Reliable UDP (ACK + Retransmission)</span>
+                    <span style={{ color: protocol === 'rudp' ? '#f59e0b' : '#cbd5e1', fontWeight: 600 }}>
+                      Reliable UDP (Stop-and-Wait ARQ)
+                    </span>
                   </label>
                 </div>
               </div>
 
-              <button
-                type="button"
-                onClick={handleStart}
-                disabled={isSubmitting || isRunning}
-                style={{
-                  width: '100%',
-                  padding: '9px',
-                  background: (isSubmitting || isRunning) ? '#1e3a5f' : '#2563eb',
-                  border: 'none',
-                  color: '#fff',
+              {/* NetAnim Auto-Launch Checkbox */}
+              <div style={{ marginBottom: '12px' }}>
+                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.74rem', color: '#e2e8f0', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={autoNetAnim}
+                    onChange={(e) => setAutoNetAnim(e.target.checked)}
+                  />
+                  <span style={{ color: autoNetAnim ? '#38bdf8' : '#94a3b8', fontWeight: 600 }}>
+                    ⚡ Auto-launch NetAnim desktop viewer on completion
+                  </span>
+                </label>
+              </div>
+
+              {/* Advanced NS-3 Topology & Coding Settings Toggle */}
+              <div style={{ marginBottom: '14px' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowAdvanced(!showAdvanced)}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    color: '#38bdf8',
+                    fontSize: '0.74rem',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                    padding: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px',
+                  }}
+                >
+                  <span>{showAdvanced ? '▾ Hide Advanced NS-3 Settings' : '▸ Show Advanced NS-3 Settings'}</span>
+                </button>
+
+                {showAdvanced && (
+                  <div style={{
+                    marginTop: '10px',
+                    background: '#14253d',
+                    padding: '10px',
+                    borderRadius: '6px',
+                    border: '1px solid #1e3a5f',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '8px',
+                    fontSize: '0.72rem',
+                  }}>
+                    <div>
+                      <span style={{ color: '#94a3b8', display: 'block', marginBottom: '2px' }}>Point-to-Point Bandwidth:</span>
+                      <select
+                        value={bandwidth}
+                        onChange={(e) => setBandwidth(e.target.value)}
+                        style={{ width: '100%', padding: '4px 6px', background: '#0a1426', color: '#fff', border: '1px solid #334155', borderRadius: '4px' }}
+                      >
+                        <option value="1Mbps">1 Mbps</option>
+                        <option value="5Mbps">5 Mbps (Default)</option>
+                        <option value="10Mbps">10 Mbps</option>
+                        <option value="50Mbps">50 Mbps</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <span style={{ color: '#94a3b8', display: 'block', marginBottom: '2px' }}>Propagation Delay:</span>
+                      <select
+                        value={delayMs}
+                        onChange={(e) => setDelayMs(e.target.value)}
+                        style={{ width: '100%', padding: '4px 6px', background: '#0a1426', color: '#fff', border: '1px solid #334155', borderRadius: '4px' }}
+                      >
+                        <option value="5">5 ms (LAN / Data Center)</option>
+                        <option value="20">20 ms (Default Terrestrial)</option>
+                        <option value="50">50 ms (Long Distance)</option>
+                        <option value="100">100 ms (Satellite Link)</option>
+                      </select>
+                    </div>
+
+                    {protocol === 'rlnc' ? (
+                      <>
+                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                          <div>
+                            <span style={{ color: '#94a3b8', display: 'block', marginBottom: '2px' }}>Gen Size (K):</span>
+                            <input
+                              type="number"
+                              min="1"
+                              max="16"
+                              value={K}
+                              onChange={(e) => setK(e.target.value)}
+                              style={{ width: '100%', padding: '4px 6px', background: '#0a1426', color: '#fff', border: '1px solid #334155', borderRadius: '4px' }}
+                            />
+                          </div>
+                          <div>
+                            <span style={{ color: '#94a3b8', display: 'block', marginBottom: '2px' }}>Redundancy:</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max="16"
+                              value={redundancy}
+                              onChange={(e) => setRedundancy(e.target.value)}
+                              style={{ width: '100%', padding: '4px 6px', background: '#0a1426', color: '#fff', border: '1px solid #334155', borderRadius: '4px' }}
+                            />
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <div>
+                        <span style={{ color: '#94a3b8', display: 'block', marginBottom: '2px' }}>ARQ Timeout:</span>
+                        <input
+                          type="text"
+                          disabled
+                          value="200 ms (Stop-and-Wait)"
+                          style={{ width: '100%', padding: '4px 6px', background: '#0a1426', color: '#64748b', border: '1px solid #334155', borderRadius: '4px' }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Exact NS-3 CLI Preview */}
+              <div style={{
+                background: '#0a1426',
+                border: '1px solid #14253d',
+                borderRadius: '6px',
+                padding: '6px 8px',
+                marginBottom: '12px',
+                fontSize: '0.68rem',
+                fontFamily: 'var(--font-mono)',
+                color: '#64748b',
+                overflowX: 'auto',
+                whiteSpace: 'nowrap',
+              }}>
+                <span style={{ color: '#38bdf8' }}>./ns3 run</span> "netcode-rft --protocol={protocol.toUpperCase()} --loss={lossRate} --delay={delayMs}ms --bandwidth={bandwidth}"
+              </div>
+
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  onClick={handleStart}
+                  disabled={isSubmitting || isRunning}
+                  style={{
+                    flex: 1,
+                    padding: '9px',
+                    background: (isSubmitting || isRunning) ? '#1e3a5f' : '#2563eb',
+                    border: 'none',
+                    color: '#fff',
+                    borderRadius: '6px',
+                    fontSize: '0.82rem',
+                    fontWeight: 700,
+                    cursor: (isSubmitting || isRunning) ? 'not-allowed' : 'pointer',
+                    boxShadow: '0 2px 10px rgba(37, 99, 235, 0.4)',
+                  }}
+                >
+                  {isSubmitting ? 'Starting NS-3...' : (isRunning ? 'Simulating in NS-3...' : 'Start NS-3 Simulation')}
+                </button>
+
+                {isRunning && (
+                  <button
+                    type="button"
+                    onClick={cancelTransfer}
+                    style={{
+                      padding: '9px 12px',
+                      background: 'rgba(239, 68, 68, 0.2)',
+                      border: '1px solid #ef4444',
+                      color: '#f87171',
+                      borderRadius: '6px',
+                      fontSize: '0.8rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+
+              {/* Interactive Telemetry & Channel Visualizer link */}
+              {transfer?.id && (
+                <div style={{
+                  marginTop: '12px',
+                  padding: '8px 10px',
+                  background: 'rgba(56, 189, 248, 0.1)',
+                  border: '1px solid rgba(56, 189, 248, 0.3)',
                   borderRadius: '6px',
-                  fontSize: '0.85rem',
-                  fontWeight: 700,
-                  cursor: (isSubmitting || isRunning) ? 'not-allowed' : 'pointer',
-                  boxShadow: '0 2px 10px rgba(37, 99, 235, 0.4)',
-                }}
-              >
-                {isSubmitting ? 'Starting C Engine...' : (isRunning ? 'Transfer in Progress...' : 'Start Transfer')}
-              </button>
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                }}>
+                  <div style={{ fontSize: '0.72rem', color: '#38bdf8', fontWeight: 600 }}>
+                    Real C11 Telemetry Available
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigate(`/visualizer?transferId=${transfer.id}`);
+                    }}
+                    style={{
+                      background: '#2563eb',
+                      border: 'none',
+                      color: '#fff',
+                      padding: '4px 10px',
+                      borderRadius: '4px',
+                      fontSize: '0.72rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Open Visualizer
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -643,6 +886,40 @@ export default function NetworkSimulationScreen() {
                   </a>
                 </div>
               )}
+
+              {/* Launch NetAnim Button */}
+              {transfer?.id && (
+                <div style={{ marginTop: '8px' }}>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await fetch(`/api/transfers/${transfer.id}/netanim`, { method: 'POST' });
+                      } catch (e) {
+                        console.error('Failed to launch NetAnim:', e);
+                      }
+                    }}
+                    style={{
+                      width: '100%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: '6px',
+                      padding: '7px',
+                      background: 'rgba(168, 85, 247, 0.12)',
+                      border: '1px solid rgba(168, 85, 247, 0.35)',
+                      color: '#c084fc',
+                      borderRadius: '6px',
+                      fontSize: '0.75rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    <Monitor size={14} />
+                    <span>Open in NetAnim Desktop (3.109)</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -652,6 +929,12 @@ export default function NetworkSimulationScreen() {
           currentMetrics={metrics}
           protocol={protocol}
           verification={verification}
+          selectedFile={selectedFile}
+          fileName={fileName}
+          fileSizeBytes={fileSizeBytes}
+          lossRate={lossRate}
+          isRunning={isRunning}
+          receiverState={receiverState}
         />
       </main>
     </div>

@@ -32,6 +32,7 @@ typedef struct {
     int block_size;
     int K;
     int redundancy;
+    uint32_t seed;
     char role[16];       /* "all", "sender", "receiver" */
 } engine_args_t;
 
@@ -136,6 +137,7 @@ int main(int argc, char *argv[]) {
     g_args.block_size = 1024;
     g_args.K = 4;
     g_args.redundancy = 2;
+    g_args.seed = 1;
     strcpy(g_args.role, "all");
 
     static struct option long_options[] = {
@@ -151,12 +153,13 @@ int main(int argc, char *argv[]) {
         {"block-size",  required_argument, 0, 'b'},
         {"k",           required_argument, 0, 'k'},
         {"redundancy",  required_argument, 0, 'r'},
+        {"seed",        required_argument, 0, 's'},
         {"role",        required_argument, 0, 'm'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "t:p:f:o:i:P:l:d:R:b:k:r:m:", long_options, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "t:p:f:o:i:P:l:d:R:b:k:r:s:m:", long_options, NULL)) != -1) {
         switch (opt) {
             case 't': strncpy(g_args.transfer_id, optarg, sizeof(g_args.transfer_id)-1); break;
             case 'p': strncpy(g_args.protocol, optarg, sizeof(g_args.protocol)-1); break;
@@ -170,39 +173,69 @@ int main(int argc, char *argv[]) {
             case 'b': g_args.block_size = atoi(optarg); break;
             case 'k': g_args.K = atoi(optarg); break;
             case 'r': g_args.redundancy = atoi(optarg); break;
+            case 's': g_args.seed = (uint32_t)strtoul(optarg, NULL, 10); break;
             case 'm': strncpy(g_args.role, optarg, sizeof(g_args.role)-1); break;
             default: break;
         }
     }
 
     if (g_args.file_path[0] == '\0') {
-        fprintf(stderr, "Error: --file argument is required\n");
-        return 1;
+        if (strcmp(g_args.role, "receiver") != 0) {
+            fprintf(stderr, "Error: --file argument is required for sender and all modes\n");
+            return 1;
+        }
     }
     if (g_args.out_path[0] == '\0') {
-        snprintf(g_args.out_path, sizeof(g_args.out_path), "%s.reconstructed", g_args.file_path);
+        if (g_args.file_path[0] != '\0') {
+            snprintf(g_args.out_path, sizeof(g_args.out_path), "%s.reconstructed", g_args.file_path);
+        } else {
+            snprintf(g_args.out_path, sizeof(g_args.out_path), "received_output.bin");
+        }
     }
 
     events_init(g_args.transfer_id);
+    rlnc_set_seed(g_args.seed);
 
     char orig_sha[65] = {0};
     size_t orig_sz = 0;
     compute_sha256_hex(g_args.file_path, orig_sha, &orig_sz);
 
     impairment_config_t impair;
-    impairment_init(&impair, g_args.loss_rate, g_args.delay_ms, g_args.reorder != 0, 42);
+    impairment_init(&impair, g_args.loss_rate, g_args.delay_ms, g_args.reorder != 0, g_args.seed);
 
     netcode_metrics_t metrics;
     metrics_init(&metrics, g_args.transfer_id, g_args.protocol, g_args.loss_rate, g_args.delay_ms, orig_sz, g_args.block_size, g_args.K);
     metrics_start(&metrics);
 
+    size_t total_blocks = orig_sz > 0 ? ((orig_sz + g_args.block_size - 1) / g_args.block_size) : 0;
+    size_t total_gens = (strcmp(g_args.protocol, "rlnc") == 0 && total_blocks > 0) ? ((total_blocks + g_args.K - 1) / g_args.K) : (orig_sz > 0 ? 1 : 0);
+    printf("[TRANSFER-INIT] Transfer ID: %s | Protocol: %s | Mode: %s\n", g_args.transfer_id, g_args.protocol, g_args.role);
+    printf("[TRANSFER-INIT] File: %s -> %s\n", g_args.file_path, g_args.out_path);
+    printf("[TRANSFER-INIT] Parameters: FileSize=%zu bytes, BlockSize=%d, K=%d, Redundancy=%d, Seed=%u, Blocks=%zu, Gens=%zu\n",
+           orig_sz, g_args.block_size, g_args.K, g_args.redundancy, g_args.seed, total_blocks, total_gens);
+    printf("[TRANSFER-INIT] Network Channel: Target=%s:%d | Loss=%.1f%%, Delay=%dms, Reorder=%d\n",
+           g_args.ip, g_args.port, g_args.loss_rate * 100.0, g_args.delay_ms, g_args.reorder);
+    fflush(stdout);
+
     thread_ctx_t ctx;
     memset(&ctx, 0, sizeof(ctx));
+    ctx.orig_sz = orig_sz;
+    ctx.metrics = &metrics;
+    ctx.impair = &impair;
 
     if (strcmp(g_args.role, "all") == 0) {
         /* Open UDP sockets */
         int rx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (rx_sock < 0) {
+            perror("socket rx_sock");
+            return 1;
+        }
         int tx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (tx_sock < 0) {
+            perror("socket tx_sock");
+            close(rx_sock);
+            return 1;
+        }
 
         int opt_reuse = 1;
         setsockopt(rx_sock, SOL_SOCKET, SO_REUSEADDR, &opt_reuse, sizeof(opt_reuse));
@@ -215,14 +248,17 @@ int main(int argc, char *argv[]) {
 
         if (bind(rx_sock, (struct sockaddr *)&rx_addr, sizeof(rx_addr)) < 0) {
             perror("bind rx_sock");
+            close(rx_sock);
+            close(tx_sock);
             return 1;
         }
 
+        printf("[SOCKET-INIT] Receiver UDP socket (fd=%d) bound to 0.0.0.0:%d (Listening)\n", rx_sock, g_args.port);
+        printf("[SOCKET-INIT] Sender UDP socket (fd=%d) configured for target %s:%d\n", tx_sock, g_args.ip, g_args.port);
+        fflush(stdout);
+
         ctx.rx_sock = rx_sock;
         ctx.tx_sock = tx_sock;
-        ctx.orig_sz = orig_sz;
-        ctx.metrics = &metrics;
-        ctx.impair = &impair;
 
         pthread_t th_rx, th_tx;
         pthread_create(&th_rx, NULL, receiver_thread, &ctx);
@@ -233,6 +269,44 @@ int main(int argc, char *argv[]) {
 
         close(rx_sock);
         close(tx_sock);
+    } else if (strcmp(g_args.role, "receiver") == 0) {
+        int rx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (rx_sock < 0) {
+            perror("socket rx_sock");
+            return 1;
+        }
+        int opt_reuse = 1;
+        setsockopt(rx_sock, SOL_SOCKET, SO_REUSEADDR, &opt_reuse, sizeof(opt_reuse));
+
+        struct sockaddr_in rx_addr;
+        memset(&rx_addr, 0, sizeof(rx_addr));
+        rx_addr.sin_family = AF_INET;
+        rx_addr.sin_port = htons(g_args.port);
+        rx_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+
+        if (bind(rx_sock, (struct sockaddr *)&rx_addr, sizeof(rx_addr)) < 0) {
+            perror("bind rx_sock");
+            close(rx_sock);
+            return 1;
+        }
+        printf("[SOCKET-INIT] Standalone Receiver socket (fd=%d) bound to 0.0.0.0:%d\n", rx_sock, g_args.port);
+        fflush(stdout);
+
+        ctx.rx_sock = rx_sock;
+        receiver_thread(&ctx);
+        close(rx_sock);
+    } else if (strcmp(g_args.role, "sender") == 0) {
+        int tx_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (tx_sock < 0) {
+            perror("socket tx_sock");
+            return 1;
+        }
+        printf("[SOCKET-INIT] Standalone Sender socket (fd=%d) targeting %s:%d\n", tx_sock, g_args.ip, g_args.port);
+        fflush(stdout);
+
+        ctx.tx_sock = tx_sock;
+        sender_thread(&ctx);
+        close(tx_sock);
     }
 
     metrics_stop(&metrics);
@@ -241,12 +315,47 @@ int main(int argc, char *argv[]) {
     /* Verify file integrity */
     char recon_sha[65] = {0};
     size_t recon_sz = 0;
-    compute_sha256_hex(g_args.out_path, recon_sha, &recon_sz);
+    bool passed = false;
 
-    bool b_equal = compare_files_byte_for_byte(g_args.file_path, g_args.out_path);
-    bool passed = (ctx.tx_res == 0 && ctx.rx_res == 0 && b_equal && (strcmp(orig_sha, recon_sha) == 0));
+    if (strcmp(g_args.role, "all") == 0) {
+        compute_sha256_hex(g_args.out_path, recon_sha, &recon_sz);
+        bool b_equal = compare_files_byte_for_byte(g_args.file_path, g_args.out_path);
+        bool non_empty_empty_hash = (orig_sz > 0 && (strcmp(orig_sha, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0 ||
+                                                     strcmp(recon_sha, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855") == 0));
+        passed = (ctx.tx_res == 0 && ctx.rx_res == 0 && (orig_sz == recon_sz) && !non_empty_empty_hash && b_equal && (strcmp(orig_sha, recon_sha) == 0));
 
-    event_emit_verification_result(passed, orig_sha, recon_sha, orig_sz, recon_sz);
+        event_emit_verification_result(passed, orig_sha, recon_sha, orig_sz, recon_sz);
+
+        printf("[VERIFICATION] Source:       Size=%zu bytes | SHA-256=%s\n", orig_sz, orig_sha);
+        printf("[VERIFICATION] Reconstructed: Size=%zu bytes | SHA-256=%s\n", recon_sz, recon_sha);
+        printf("[VERIFICATION] Status:        %s (Byte-for-byte: %s)\n",
+               passed ? "PASSED (Cryptographic Hash & Size Match)" : "FAILED (Integrity Mismatch)",
+               b_equal ? "EQUAL" : "MISMATCH");
+    } else if (strcmp(g_args.role, "sender") == 0) {
+        passed = (ctx.tx_res == 0);
+        printf("[SENDER-COMPLETE] Status: %s | Source File: %zu bytes (SHA-256: %s)\n",
+               passed ? "SUCCESS" : "FAILED", orig_sz, orig_sha);
+    } else if (strcmp(g_args.role, "receiver") == 0) {
+        compute_sha256_hex(g_args.out_path, recon_sha, &recon_sz);
+        passed = (ctx.rx_res == 0);
+        if (g_args.file_path[0] != '\0' && orig_sz > 0) {
+            bool b_equal = compare_files_byte_for_byte(g_args.file_path, g_args.out_path);
+            passed = passed && (orig_sz == recon_sz) && b_equal && (strcmp(orig_sha, recon_sha) == 0);
+            printf("[VERIFICATION] Source:       Size=%zu bytes | SHA-256=%s\n", orig_sz, orig_sha);
+            printf("[VERIFICATION] Reconstructed: Size=%zu bytes | SHA-256=%s\n", recon_sz, recon_sha);
+            printf("[VERIFICATION] Status:        %s (Byte-for-byte: %s)\n",
+                   passed ? "PASSED (Cryptographic Hash & Size Match)" : "FAILED (Integrity Mismatch)",
+                   b_equal ? "EQUAL" : "MISMATCH");
+        } else {
+            printf("[RECEIVER-COMPLETE] Status: %s | Received File: %zu bytes (SHA-256: %s)\n",
+                   passed ? "SUCCESS" : "FAILED", recon_sz, recon_sha);
+        }
+        event_emit_verification_result(passed, orig_sha[0] ? orig_sha : "N/A", recon_sha, orig_sz, recon_sz);
+    }
+
+    printf("[TRANSFER-COMPLETE] Duration=%.3fs | Sent=%u pkts, Recv=%u pkts, Dropped=%u pkts | Goodput=%.2f Mbps\n",
+           metrics.duration_s, metrics.packets_sent, metrics.packets_received, metrics.packets_dropped, metrics.goodput_mbps);
+    fflush(stdout);
 
     return passed ? 0 : 2;
 }

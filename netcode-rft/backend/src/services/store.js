@@ -22,9 +22,15 @@ function loadJSON(filePath, fallback) {
 
 function saveJSON(filePath, data) {
   try {
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+    fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf8');
+    fs.renameSync(tmp, filePath);
   } catch (err) {
-    console.error(`Error saving ${filePath}:`, err);
+    try {
+      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
+    } catch (e) {
+      console.error(`Error saving ${filePath}:`, e);
+    }
   }
 }
 

@@ -250,3 +250,113 @@ test('Positive Control: Bit-exact reconstructed file reports SUCCESS with matchi
     server.close();
   }
 });
+
+test('Regression Test: Non-empty file evaluating to empty-file SHA-256 is explicitly rejected', async () => {
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    const dummyPath = path.join(UPLOADS_DIR, `test_nonempty_emptyhash_${Date.now()}.bin`);
+    const reconPath = dummyPath + '.reconstructed';
+    const nonZeroData = Buffer.from('Non-empty test payload bytes 123456');
+    fs.writeFileSync(dummyPath, nonZeroData);
+    fs.writeFileSync(reconPath, nonZeroData);
+
+    const EMPTY_SHA = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+    // Deliberately set fileSha256 to empty hash for non-empty file
+    const t = store.createTransfer({
+      id: `test-transfer-fakeempty-${Date.now()}`,
+      filename: 'fakeempty.bin',
+      filePath: dummyPath,
+      fileSize: nonZeroData.length,
+      fileSha256: EMPTY_SHA,
+      protocol: 'rudp',
+    });
+
+    store.updateTransfer(t.id, { status: 'completed', exitCode: 0 });
+
+    const res = await fetch(`http://localhost:${port}/api/transfers/${t.id}/verification`);
+    const data = await res.json();
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.verified, false);
+    assert.strictEqual(data.state, 'FAILED');
+    assert.ok(data.message.includes('Non-empty file evaluated to empty-file SHA-256'));
+  } finally {
+    server.close();
+  }
+});
+
+test('Regression Test: Missing source file causes verification to fail', async () => {
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    const nonexistentPath = path.join(UPLOADS_DIR, `test_missing_src_${Date.now()}.bin`);
+    const t = store.createTransfer({
+      id: `test-transfer-missingsrc-${Date.now()}`,
+      filename: 'nonexistent.bin',
+      filePath: nonexistentPath,
+      fileSize: 100,
+      fileSha256: 'abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890',
+      protocol: 'rudp',
+    });
+
+    store.updateTransfer(t.id, { status: 'completed', exitCode: 0 });
+
+    const res = await fetch(`http://localhost:${port}/api/transfers/${t.id}/verification`);
+    const data = await res.json();
+    assert.strictEqual(res.status, 200);
+    assert.strictEqual(data.verified, false);
+    assert.strictEqual(data.state, 'FAILED');
+  } finally {
+    server.close();
+  }
+});
+
+test('Regression Test: Stale or mismatched transfer results are isolated', async () => {
+  const server = app.listen(0);
+  const port = server.address().port;
+
+  try {
+    const file1 = path.join(UPLOADS_DIR, `test_stale1_${Date.now()}.bin`);
+    const file2 = path.join(UPLOADS_DIR, `test_stale2_${Date.now()}.bin`);
+    fs.writeFileSync(file1, Buffer.from('Transfer 1 Data'));
+    fs.writeFileSync(file1 + '.reconstructed', Buffer.from('Transfer 1 Data'));
+    fs.writeFileSync(file2, Buffer.from('Transfer 2 Different Data'));
+    // Deliberately leave file2 reconstructed missing
+    const t1 = store.createTransfer({
+      id: `test-stale-1-${Date.now()}`,
+      filename: 'stale1.bin',
+      filePath: file1,
+      fileSize: 15,
+      fileSha256: computeSha(Buffer.from('Transfer 1 Data')),
+      protocol: 'rudp',
+    });
+    store.updateTransfer(t1.id, { status: 'completed', exitCode: 0 });
+
+    const t2 = store.createTransfer({
+      id: `test-stale-2-${Date.now()}`,
+      filename: 'stale2.bin',
+      filePath: file2,
+      fileSize: 25,
+      fileSha256: computeSha(Buffer.from('Transfer 2 Different Data')),
+      protocol: 'rudp',
+    });
+    store.updateTransfer(t2.id, { status: 'completed', exitCode: 0 });
+
+    // t1 must be SUCCESS
+    const res1 = await (await fetch(`http://localhost:${port}/api/transfers/${t1.id}/verification`)).json();
+    assert.strictEqual(res1.state, 'SUCCESS');
+    assert.strictEqual(res1.verified, true);
+
+    // t2 must be FAILED and cannot inherit t1's success
+    const res2 = await (await fetch(`http://localhost:${port}/api/transfers/${t2.id}/verification`)).json();
+    assert.strictEqual(res2.state, 'FAILED');
+    assert.strictEqual(res2.verified, false);
+    assert.ok(res2.message.includes('does not exist'));
+  } finally {
+    server.close();
+  }
+});
+

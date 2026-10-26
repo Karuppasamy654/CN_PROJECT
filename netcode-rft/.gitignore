@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Testing and Coverage
+coverage/
+
+# Build artifacts
+dist/
+build/
+*.o
+*.a
+*.so
+bin/
+engine/bin/
+*.exe
+
+# Logs and databases
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Environment and OS
+.env
+.env.local
+.DS_Store
+Thumbs.db
+
+# Storage and uploads (preserve directory structure via .gitkeep)
+uploads/*
+!uploads/.gitkeep
+backend/uploads/*
+!backend/uploads/.gitkeep
+downloads/*
+!downloads/.gitkeep
+storage/*.tmp*
+storage/*.reconstructed
+storage/*.bin*
+
+# Results temporary test artifacts
+results/*.out
+results/*.tmp

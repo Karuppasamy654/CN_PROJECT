@@ -29,13 +29,39 @@ void rlnc_encode_systematic(rlnc_encoder_t *enc, uint8_t index, uint8_t *coeffs_
     }
 }
 
+#include <time.h>
+
+static uint64_t g_rlnc_seed = 0;
+
+void rlnc_set_seed(uint32_t seed) {
+    if (seed == 0) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        g_rlnc_seed = ((uint64_t)ts.tv_sec << 32) ^ (uint64_t)ts.tv_nsec ^ 0x853c49e65d6f8301ULL;
+    } else {
+        g_rlnc_seed = (uint64_t)seed;
+    }
+    if (g_rlnc_seed == 0) g_rlnc_seed = 1;
+}
+
+static uint8_t rlnc_rand_byte(void) {
+    if (g_rlnc_seed == 0) {
+        rlnc_set_seed(0);
+    }
+    g_rlnc_seed ^= g_rlnc_seed << 13;
+    g_rlnc_seed ^= g_rlnc_seed >> 7;
+    g_rlnc_seed ^= g_rlnc_seed << 17;
+    uint8_t byte = (uint8_t)(g_rlnc_seed & 0xFF);
+    return (byte == 0) ? 1 : byte; /* Nonzero coefficients yield robust random combinations */
+}
+
 void rlnc_encode_random(rlnc_encoder_t *enc, uint8_t *coeffs_out, uint8_t *payload_out) {
     gf256_init();
     memset(payload_out, 0, enc->block_size);
 
     bool all_zero = true;
     for (uint8_t i = 0; i < enc->K; i++) {
-        coeffs_out[i] = (uint8_t)(rand() % 256);
+        coeffs_out[i] = rlnc_rand_byte();
         if (coeffs_out[i] != 0) all_zero = false;
     }
     if (all_zero) coeffs_out[0] = 1;

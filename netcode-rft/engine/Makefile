@@ -18,12 +18,15 @@ bin/test_%: tests/test_%.o $(OBJS)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
-test: bin/test_gf256 bin/test_rlnc bin/test_protocol bin/test_reliable_udp
+test: bin/test_gf256 bin/test_rlnc bin/test_protocol bin/test_reliable_udp bin/test_packet_loss bin/test_rudp_retransmission bin/test_file_integrity
 	@echo "=== Running C Engine Unit Tests ==="
 	./bin/test_gf256
 	./bin/test_rlnc
 	./bin/test_protocol
 	./bin/test_reliable_udp
+	./bin/test_packet_loss
+	./bin/test_rudp_retransmission
+	./bin/test_file_integrity
 	@echo "=== All C Unit Tests Completed Successfully ==="
 
 clean:

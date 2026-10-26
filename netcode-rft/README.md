@@ -1,169 +1,311 @@
-# NetCode-RFT — Loss-Resilient File Transfer over UDP using Network Coding
+# NetCode-RFT: NS-3 & C11 Simulation Platform with NetAnim Integration
 
-NetCode-RFT is a computer networking application demonstrating reliable file transfer over POSIX UDP sockets. It benchmarks **Random Linear Network Coding (RLNC)** over Galois Field **GF(256)** against a **Reliable UDP (Stop-and-Wait ARQ)** baseline under controlled network impairments.
+**NetCode-RFT** is a comprehensive computer networking and error-control research platform featuring **NS-3 (v3.41) discrete-event simulation**, **NetAnim (v3.109) desktop animation**, a **native C (C11) networking engine**, **finite field arithmetic GF(256)**, **Random Linear Network Coding (RLNC)**, **Stop-and-Wait Reliable UDP (RUDP)**, a **Node.js process supervisor**, and an **interactive React engineering dashboard**.
 
-The application couples a **C11 POSIX networking engine**, an **Express/Socket.IO Node.js supervision backend**, and a **React dashboard** designed directly after the reference engineering specification.
+The platform benchmarks, analyzes, and visualizes two contrasting transport strategies over real Point-to-Point links and UDP network sockets subject to configurable impairment (physical packet loss, propagation delay, and reproducible random seeds):
 
----
+1. **Random Linear Network Coding (RLNC)**: Forward Error Correction (FEC) over Galois Field **GF(256)** using primitive polynomial `0x11D` and generator `0x02`. Transfers systematic source packets followed by linear combination repair packets, decoded on-the-fly via progressive Gaussian elimination.
+2. **Reliable UDP (RUDP)**: Stop-and-Wait Automatic Repeat reQuest (**ARQ**) with sequence numbering, acknowledgment packets (ACKs), retransmission timeouts, and duplicate packet detection.
 
-## 📸 Two-Screen Architecture
-
-### Screen 1: Transfer & Simulation (`/`)
-An operational network engineering dashboard structured into three upper panels and a comparative results table:
-1. **Left Panel — File Upload & Simulation Settings**:
-   - File picker supporting arbitrary binaries and one-click **⚡ Load Sample File (256 KB / 4 KB Demo)**.
-   - Channel impairment controls: Packet Loss Rate (0%, 5%, 10%, 20%, 30%).
-   - Protocol selector: **Network Coding (RLNC)** vs. **Reliable UDP (ACK + Retransmission)**.
-   - Action button: **Start Transfer**.
-2. **Center Panel — UDP Conduit & Packet Transmission**:
-   - **UDP Connection (Three-Way Handshake)**: Visualizes genuine application-level UDP exchange:
-     - `1. SYN (Request)`: Sender $\rightarrow$ Receiver
-     - `2. SYN-ACK (Response)`: Receiver $\rightarrow$ Sender
-     - `3. ACK (Confirmation)`: Sender $\rightarrow$ Receiver
-   - **Packet Transmission**: Real-time packet cards displaying transmission lifecycle:
-     - Outgoing datagrams: `P1 (Send)`, `P2 (Send)`
-     - Impairment drops: `P3 (Lost ✕)` (marked with red loss indicator)
-     - Receiver arrivals: `P6 (Received)` (marked with green receipt badge)
-3. **Right Panel — Transfer Progress & Receiver Status**:
-   - **Transfer Progress**: Active progress bar (100%), completion status, total generated packets, sent, lost, received, transfer time, and throughput.
-   - **File at Receiver**: Receiver file card, **Verify File (SHA-256)** button, status indicator, and direct download endpoint.
-4. **Bottom Full-Width Panel — Performance Comparison**:
-   - Comparative table contrasting RLNC against Reliable UDP across:
-     - File Recovery Success
-     - Transfer Duration (s)
-     - Measured Throughput (KB/s)
-     - Retransmission Count
-     - Additional Data Transmitted (KB)
-     - Decoding Computation Time (s)
+### 🎯 Faculty & Mentor Demonstration Ready
+* **NS-3 Network Simulation**: Built on `/home/muthu/ns-allinone-3.41/ns-3.41` with genuine `PointToPointHelper`, `RateErrorModel`, `PhyRxDrop` sinks, and `AnimationInterface`.
+* **NetAnim Desktop Animator**: Installed at `/usr/local/bin/netanim`. Loads generated XML traces with Node 0 (Sender) and Node 1 (Receiver), packet movement, and drop statistics.
+* **Pure C11 Engine**: Native BSD UDP socket transfer engine (`engine/bin/netcode_engine`) compiled with `-std=c11 -Wall -Wextra -O2 -pthread`.
+* **Full-Stack Dashboard**: Web UI at `http://localhost:3000` with one-click NetAnim launching, live telemetry streaming, Equation Lab, and cryptographic SHA-256 integrity verification.
 
 ---
 
-### Screen 2: Equation Lab (`/equations`)
-Provides an educational mathematical breakdown of the selected transfer through six sequential steps:
-1. **❶ Received Coded Packets**: Generation breakdown ($k=3$ / $k=4$), coefficient vectors $[c_1, c_2, c_3]$, and payload bytes.
-2. **❷ Coefficient Matrix (A) & Coded Data Matrix (C)**:
-   - Full coefficient matrix $A$ in mathematical bracket notation:
-     $$A = \begin{bmatrix} 1 & 0 & 2 \\ 0 & 1 & 3 \\ 1 & 1 & 1 \\ 2 & 1 & 0 \end{bmatrix}$$
-   - Matrix rank indicator ($\text{Rank} = k$, `Full Rank ✔`).
-   - Coded payload matrix $C$.
-3. **❸ Gaussian Elimination (GF(256))**:
-   - Augmented system $[A \mid C]$.
-   - Step 1: Row transformations with finite-field arithmetic ($R_3 \leftarrow R_3 + R_1$, $R_4 \leftarrow R_4 + 2R_1$).
-   - Step 2: Pivot normalization and column elimination.
-   - Resulting inverse matrix $A^{-1}$.
-4. **❹ Decode Source Packets**:
-   - Finite-field matrix product: $X = A^{-1} \times C \pmod{\text{GF}(256)}$.
-   - Recovered source blocks $P_1, P_2, P_3$.
-5. **❺ Reconstruct File**:
-   - Reassembly progress bar (100%) and block concatenation.
-6. **❻ SHA-256 Verification**:
-   - Original file cryptographic digest vs. receiver output digest.
-   - Status badge: `Hashes match! File is identical. ✔`.
+## 🏛️ System Architecture
+
+```
+                       +-------------------------------------------------+
+                       |             React Dashboard (Vite)              |
+                       |  Controls • Telemetry Visualizer • Equation Lab |
+                       +------------------------+------------------------+
+                                                | HTTP / Socket.IO
+                                                v
+                       +-------------------------------------------------+
+                       |           Node.js Supervisor Backend            |
+                       | Process Manager • Stream Parser • Hash Verifier |
+                       +------------------------+------------------------+
+                                                | Spawns & Streams EVENT_JSON / METRICS_JSON
+                                                v
+     +----------------------------------------------------------------------------------------+
+     |                              C11 Networking Engine (GCC)                              |
+     |  Node 0 (Sender) <========== BSD UDP Sockets (127.0.0.1:Port) ==========> Node 1 (Recv)|
+     |                                                                                        |
+     |  [RLNC Protocol Engine]                                 [RUDP Protocol Engine]         |
+     |  • GF(256) Arithmetic (Poly 0x11D)                      • Sequence Numbers             |
+     |  • Systematic Vectors [1 0 0 0]                         • Stop-and-Wait ARQ Timers     |
+     |  • Coded Repair Packets sum(c_i * B_i)                  • ACK Generation & Validation  |
+     |  • Progressive Gaussian Elimination                     • Retransmissions & Timeout    |
+     |  • Matrix Rank Tracking (rank = K)                      • Duplicate Packet Detection   |
+     |                                                                                        |
+     |  [Channel Impairment Layer]                             [Integrity & Verification]     |
+     |  • Deterministic 64-bit PRNG Seed                       • NIST SHA-256 Checksums       |
+     |  • Configurable Packet Loss (0-90%)                     • Byte-for-byte File Compare   |
+     |  • Simulated Link Latency & Reorder                     • Accurate Goodput Accounting  |
+     +----------------------------------------------------------------------------------------+
+```
 
 ---
 
-## ⚙️ Technical Specifications & Implementation Details
+## 🔬 Core Components & Capabilities
 
-### 1. Finite Field Arithmetic (GF(256))
-- **Field Size**: $2^8 = 256$ elements.
-- **Irreducible Primitive Polynomial**:
-  $$P(x) = x^8 + x^4 + x^3 + x^2 + 1 \quad (\text{Hex: } \texttt{0x11D})$$
-- **Primitive Generator Element**: $g = 0\text{x}02$.
-- **Arithmetic Architecture**:
-  - Addition / Subtraction: Bitwise XOR ($\oplus$).
-  - Multiplication / Inversion: 256-byte precomputed logarithm and antilogarithm lookup tables (`gf256_mul`, `gf256_inv`).
-  - Self-identity: For all $a \in \text{GF}(256) \setminus \{0\}$, $a \otimes a^{-1} = 1$.
+### 1. Pure C (C11) Networking & Protocol Engine
+* **Language Standard**: Strict **ISO C11** (`-std=c11 -Wall -Wextra -O2`). Zero C++ files, classes, templates, or external simulation frameworks.
+* **Socket Architecture**: Standard BSD/POSIX UDP sockets (`socket(AF_INET, SOCK_DGRAM, 0)`, `bind`, `sendto`, `recvfrom`, `setsockopt`).
+* **Concurrency**: POSIX threads (`pthread`) for simultaneous sender and receiver loopback execution, or standalone CLI roles (`--role all`, `--role sender`, `--role receiver`).
+* **Binary Packaging**: Compact custom protocol header (`netcode_header_t`) with magic bytes `['N', 'C']`, protocol version, packet type, sequence ID, generation ID, block ID, payload length, and payload CRC32.
 
-### 2. Random Linear Network Coding (RLNC)
-- Source files are partitioned into $N = \lceil S / B \rceil$ blocks of size $B$ (default 1024 bytes).
-- Blocks are grouped into generations of size $K$ (default $K=4$).
-- For each generation $g$, the sender transmits:
-  1. **Systematic Packets**: Unit vectors $e_i$ ($i \in [0, K-1]$).
-  2. **Coded Redundancy Packets**: Linear combinations $Y = \sum_{i=1}^K c_i B_i$, where $c_i \xleftarrow{\text{R}} \text{GF}(256)$.
-- The receiver maintains a local decoding matrix $A$ and performs progressive Gauss-Jordan elimination on innovative packets. Once $\text{rank}(A) = K$, full recovery is achieved and written to the output file.
+### 2. GF(256) Finite Field Arithmetic
+* **Field Representation**: Galois Field $GF(2^8) = GF(256)$.
+* **Primitive Polynomial**: $P(x) = x^8 + x^4 + x^3 + x^2 + 1$ (`0x11D`).
+* **Generator Element**: $g = 0\text{x}02$.
+* **Fast Computation**: Precomputed exponent and logarithm lookup tables for $O(1)$ multiplication, division, and multiplicative inverses ($a \cdot a^{-1} = 1$).
+* **Verification**: Bitwise Russian Peasant reference calculation to mathematically verify all $256 \times 256$ multiplication combinations.
+* **Vector Accelerators**: Row multiplication (`gf256_row_mul`) and row multiply-accumulate (`gf256_row_madd`) for augmented matrix operations.
 
-### 3. Reliable UDP Baseline
-- Stop-and-Wait ARQ implementation over UDP sockets.
-- Sequence-numbered datagrams (`PKT_TYPE_DATA_RUDP`), explicit ACK datagrams (`PKT_TYPE_ACK`).
-- Timeout-driven retransmissions (default 100ms) with bounded retry budgets ($R_{\max} = 10$).
+### 3. Genuine Random Linear Network Coding (RLNC)
+* **Generations**: File split into generations of size $K$ blocks (configurable $K \in [1, 32]$).
+* **Systematic Packets**: First $K$ packets contain original source blocks and canonical unit coefficient vectors ($e_i$).
+* **Coded Repair Packets**: Redundancy packets carry random coefficient vectors $[c_0, c_1, \dots, c_{K-1}] \in GF(256)^K$ and linear combinations $P = \sum_{i=0}^{K-1} c_i \cdot B_i$.
+* **On-the-Fly Gaussian Elimination**: Receiver maintains an augmented matrix $[A \mid C]$. Each arriving packet is eliminated against existing pivot rows. If innovative, it normalizes to unit leading coefficient and back-substitutes against previous rows.
+* **Rank Completion**: Reconstructs original source blocks as soon as $\text{rank}(A) = K$, without needing retransmissions for lost systematic packets if sufficient coded repair packets arrive.
 
-### 4. Integrity Verification & Negative Testing
-- **Receiver-Side Output**: Output files are written to `<filename>_received_RLNC.<ext>` or `<filename>_received_RUDP.<ext>`. The original file is **never** copied directly.
-- **Cryptographic Hash**: SHA-256 digests are computed independently from disk for both original and reconstructed files.
-- **Negative Testing Scenarios**:
-  - Premature transfer cancellation: Reports `CANCELLED`.
-  - Bit flip in reconstructed file: Reports `FAILED` (SHA-256 mismatch).
-  - Truncated reconstructed file: Reports `FAILED` (size mismatch).
-  - High loss exceeding packet budget: Reports `FAILED` (insufficient rank).
+### 4. Stop-and-Wait Reliable UDP (RUDP) Baseline
+* **Sequencing**: Monotonically increasing sequence IDs on every data packet.
+* **ARQ Reliability**: Sender sends packet and waits for matching ACK with configurable timeout (`RUDP_TIMEOUT_MS = 200ms`).
+* **Duplicate Detection**: Receiver discards duplicate packets while re-emitting ACKs to resolve reverse ACK loss.
+* **Graceful Termination**: Three-way application handshake and FIN/FIN-ACK connection closure.
+
+### 5. Impairment Simulation & Reproducible Seeds
+* **Loss Model**: Per-packet drop decision based on configured loss rate ($0.0$ to $1.0$).
+* **Reproducibility**: Per-instance 64-bit SplitMix64 pseudo-random number generator initialized from `--seed <val>`. Two runs with the same seed generate 100% identical packet drop patterns.
+* **Delay & Reorder**: Link propagation latency simulation via microsecond timers and packet hold buffering.
+
+### 6. Cryptographic Integrity Verification
+* **SHA-256 Engine**: NIST-compliant SHA-256 hash algorithm implemented in C11 (`sha256.c`).
+* **Byte-for-Byte Comparison**: Exact byte comparison (`compare_files_byte_for_byte`) between source file and reconstructed destination file.
+* **Verification Gating**: Downloads and success badges are strictly blocked if size or SHA-256 hashes mismatch.
+
+### 7. Native in-UI Telemetry & Channel Visualizer
+* **Interactive Timeline**: Replaces deprecated external NetAnim with an interactive React visualizer (`/visualizer`).
+* **Visual States**: Packet badges in flight showing Seq ID, Gen ID, Type, and status (Transmitted, In Flight, Dropped, Delivered, ACK).
+* **Rank Progression**: Real-time augmented matrix rank evolution display ($r/K$).
+* **Playback Controls**: Play, Pause, Step Forward, Step Backward, Restart, and Speed controls (0.5x, 1x, 2x, 4x).
 
 ---
 
-## 🛠️ Project Structure
+## 📁 Repository Directory Structure
 
 ```
 netcode-rft/
-├── engine/                   # C11 Networking Engine
-│   ├── include/              # Headers (gf256.h, rlnc.h, protocol.h, events.h, metrics.h)
-│   ├── src/                  # Source files (main.c, gf256.c, rlnc.c, transfer.c, reliable_udp.c)
-│   ├── tests/                # C Unit tests (test_gf256.c, test_rlnc.c, test_reliable_udp.c)
-│   └── Makefile              # Engine build rules
-├── backend/                  # Node.js LTS Supervision Backend
-│   ├── src/                  # Express app, Socket.IO, EngineManager, routes, services
-│   ├── tests/                # Automated API, calculation, and negative corruption tests
-│   └── package.json
-├── ui/                       # React + Vite Frontend
+├── engine/                           # Pure C (C11) Networking Engine
+│   ├── include/
+│   │   ├── events.h                  # Real-time JSON event telemetry declarations
+│   │   ├── gf256.h                   # GF(256) finite field arithmetic & poly 0x11D
+│   │   ├── impairment.h              # Channel impairment & reproducible PRNG seeds
+│   │   ├── metrics.h                 # Throughput, goodput & packet accounting
+│   │   ├── protocol.h                # Protocol packet header & CRC32 definitions
+│   │   ├── reliable_udp.h            # Stop-and-Wait RUDP ARQ interface
+│   │   ├── rlnc.h                    # RLNC encoder/decoder & Gaussian elimination
+│   │   ├── sha256.h                  # Cryptographic SHA-256 verification
+│   │   └── transfer.h                # UDP file transfer routines
+│   ├── src/                          # C11 implementation source files (.c)
+│   ├── tests/                        # Automated unit tests in C
+│   │   ├── test_gf256.c              # GF(256) field arithmetic verification
+│   │   ├── test_protocol.c           # Packet serialization & CRC32 tests
+│   │   ├── test_rlnc.c               # Deterministic RLNC & Gaussian elimination tests
+│   │   ├── test_reliable_udp.c       # Stop-and-Wait ACK & SHA-256 NIST tests
+│   │   ├── test_packet_loss.c        # Configurable packet loss & seed reproducibility
+│   │   ├── test_rudp_retransmission.c# RUDP timeout, retransmission & duplicate filter
+│   │   └── test_file_integrity.c     # SHA-256 file hashing & corruption detection
+│   └── Makefile                      # GCC build configuration (-std=c11 -pthread)
+├── backend/                          # Node.js Express & Socket.IO Supervisor
 │   ├── src/
-│   │   ├── components/       # HandshakePanel, PacketTransmissionPanel, PerformanceTable...
-│   │   ├── screens/          # NetworkSimulationScreen.jsx, EquationLabScreen.jsx
-│   │   ├── context/          # TransferContext.jsx (Socket.IO event bus & state machine)
-│   │   └── styles/           # index.css (Dark navy aesthetic)
+│   │   ├── config.js                 # Engine binary paths and storage configuration
+│   │   ├── routes/                   # REST API routes (transfers, calculations, health)
+│   │   ├── services/                 # Engine process manager, store, calculations
+│   │   └── server.js                 # Server entry point (port 5000)
+│   └── tests/                        # 65 automated backend tests (node --test)
+├── ui/                               # React 18 + Vite Engineering Dashboard
+│   ├── src/
+│   │   ├── screens/                  # Simulation, Visualizer, Comparison, History, Equation Lab
+│   │   │   ├── NetworkSimulationScreen.jsx
+│   │   │   ├── NetworkVisualizerScreen.jsx  # Replaces legacy NetAnim with real telemetry
+│   │   │   ├── RlncVsRudpComparisonScreen.jsx
+│   │   │   ├── ExperimentHistoryScreen.jsx
+│   │   │   └── EquationLabScreen.jsx
+│   │   └── App.jsx                   # Route configuration
 │   └── package.json
-└── package.json              # Root orchestration
+├── scripts/                          # Automation, test, and verification scripts
+│   ├── build.sh                      # Full project build script
+│   ├── test.sh                       # Multi-suite automated test orchestrator
+│   ├── test_live_transfers.sh        # 10 live UDP transfers across 0-30% loss
+│   ├── test_ns3_integration.js       # End-to-end C engine integration verification
+│   └── run.sh                        # Service launcher
+├── storage/                          # Test payloads and reconstructed outputs
+├── uploads/                          # User-uploaded files
+├── Makefile                          # Top-level make targets (build, test, run, clean)
+└── README.md                         # Documentation
 ```
 
 ---
 
-## 🚀 Build, Test, and Run Instructions
+## 🛠️ Build and Run Instructions
 
 ### Prerequisites
-- GCC / C11 compiler (`gcc`, `make`, `pthread`).
-- Node.js LTS (v18+ or v20+) and `npm`.
-- Linux, Ubuntu, or Windows with WSL2.
+* **Compiler**: GCC with C11 and pthread support (available on Ubuntu 20.04+, Debian, WSL2, or MSYS2).
+* **Runtime**: Node.js v18+ and npm.
+* **Platform**: Linux, Ubuntu on WSL2 (Windows Subsystem for Linux), or MSYS2.
 
-### 1. Build the Entire System
+### 1. Build the Complete Project
+To compile the C engine and bundle the frontend:
 ```bash
-# Build C engine binary and frontend bundle
-npm run build
+# Via top-level Makefile
+make build
+
+# Or directly via bash script
+bash scripts/build.sh
 ```
+
+To compile only the C engine:
+```bash
+cd engine
+make clean all
+```
+Executable produced: `engine/bin/netcode_engine`.
 
 ### 2. Run All Automated Test Suites
+Run all tests across all layers (C engine unit tests, backend test suites, and 10 live UDP transfers):
 ```bash
-# Run C engine unit tests, Protocol tests, GF(256) tests, and RUDP tests
-wsl bash -c "cd /mnt/f/CN_project/netcode-rft/engine && make test"
+make test
+```
+Or run individual test suites:
 
-# Run backend unit tests and negative corruption test suite
-cd backend && npm test
+#### A. C Engine Unit Tests (7 test suites)
+```bash
+cd engine
+make test
+```
+Outputs:
+- `bin/test_gf256`: Galois field operations, bitwise multiplication, inverses.
+- `bin/test_rlnc`: Systematic encoding, coded combinations, Gaussian elimination.
+- `bin/test_protocol`: Packet serialization, deserialization, CRC32, corruption detection.
+- `bin/test_reliable_udp`: Stop-and-Wait ACK packets and NIST SHA-256 test vectors.
+- `bin/test_packet_loss`: Configurable loss rates (0-100%) and seed reproducibility.
+- `bin/test_rudp_retransmission`: ARQ timeouts, retransmissions, duplicate filtering.
+- `bin/test_file_integrity`: SHA-256 hashing, corruption detection, size verification.
+
+#### B. Backend API & Invariant Tests (65 test scenarios)
+```bash
+cd backend
+npm test
 ```
 
-### 3. Run Live End-to-End Transfer Test
+#### C. Live UDP Impairment Transfers (10 experiments)
 ```bash
-# Tests real UDP socket file transfer, impairment drop, reconstruction, and SHA-256 match
-cd backend && node tests/live_e2e_verify.js
+bash scripts/test_live_transfers.sh
+```
+Executes 10 genuine UDP transfers (RLNC and RUDP at 0%, 5%, 10%, 20%, 30% packet loss) over loopback sockets, verifying byte-exact reconstructed file equality and matching SHA-256 checksums.
+
+#### D. End-to-End Engine Socket Integration
+```bash
+node scripts/test_ns3_integration.js
 ```
 
-### 4. Launch the Full Application
+#### E. NS-3 Simulation & NetAnim Trace Generation
 ```bash
-# Terminal 1: Start Backend Server (port 5000)
-cd backend && node src/server.js
+# 1. Sync and build the NS-3 simulation executable
+bash scripts/build_ns3.sh
 
-# Terminal 2: Start Frontend Dev Server (port 3000)
+# 2. Run RLNC transfer under NS-3 with NetAnim XML output
+wsl /home/muthu/ns-allinone-3.41/ns-3.41/build/scratch/netcode-rft/ns3.41-netcode-rft-default \
+  --protocol=RLNC --loss=10 --seed=42 \
+  --file=/mnt/f/CN_project/netcode-rft/storage/benchmark_input.bin \
+  --out=/tmp/ns3_rlnc_out.bin \
+  --trace=/mnt/f/CN_project/netcode-rft/results/ns3_rlnc_trace.xml
+
+# 3. Launch official NetAnim 3.109 desktop viewer (via WSLg)
+wsl bash -lc "DISPLAY=:0 /usr/local/bin/netanim /mnt/f/CN_project/netcode-rft/results/ns3_rlnc_trace.xml"
+```
+
+### 3. Run the Full Application (Dashboard + Backend)
+```bash
+make run
+```
+Or start services independently:
+```bash
+# Terminal 1: Backend API (port 5000)
+cd backend && npm start
+
+# Terminal 2: React Dashboard (port 3000)
 cd ui && npm run dev
 ```
-
-* Open your browser at **`http://localhost:3000`** to access the dashboard.
-* Backend API health status: **`http://localhost:5000/api/health`**.
+Open **http://localhost:3000** in your browser.
 
 ---
 
-## 📄 License & Attribution
-Academic and research implementation of Network Coding Based Loss-Resilient File Transfer over UDP. Antigravity Systems.
+## 💻 CLI Usage for the C Networking Engine
+
+The engine binary can be executed directly from the command line:
+
+```bash
+./engine/bin/netcode_engine [OPTIONS]
+```
+
+### Command Line Options:
+| Flag | Long Option | Description | Default |
+|------|-------------|-------------|---------|
+| `-f` | `--file` | Path to input file to transmit (**required**) | — |
+| `-o` | `--out` | Path to write reconstructed output file | `<file>.reconstructed` |
+| `-p` | `--protocol` | Transfer protocol: `rlnc` or `rudp` | `rlnc` |
+| `-l` | `--loss` | Packet loss rate in percent (e.g. `10` for 10%) | `0` |
+| `-d` | `--delay` | Link propagation delay in milliseconds | `0` |
+| `-R` | `--reorder` | Enable packet reordering emulation (`1` or `0`) | `0` |
+| `-b` | `--block-size` | Payload size per block in bytes (64-1024) | `1024` |
+| `-k` | `--k` | Generation size $K$ for RLNC (1-32) | `4` |
+| `-r` | `--redundancy` | Number of coded repair packets per generation | `2` |
+| `-s` | `--seed` | Random seed for PRNG and impairment reproducibility | `1` |
+| `-i` | `--ip` | Destination IP address | `127.0.0.1` |
+| `-P` | `--port` | UDP listening port | `9000` |
+| `-m` | `--role` | Execution mode: `all`, `sender`, or `receiver` | `all` |
+| `-t` | `--transfer-id` | Transfer tracking identifier | `transfer-001` |
+
+### Example CLI Transfers:
+```bash
+# 1. RLNC transfer with 20% packet loss and reproducible seed 42
+./engine/bin/netcode_engine --protocol rlnc --file input.bin --out output.bin --loss 20 --seed 42
+
+# 2. Stop-and-Wait RUDP transfer with 10% packet loss and 15ms latency
+./engine/bin/netcode_engine --protocol rudp --file input.bin --out output.bin --loss 10 --delay 15
+
+# 3. Two-process standalone execution:
+# Terminal 1 (Receiver):
+./engine/bin/netcode_engine --protocol rlnc --file input.bin --out output.bin --port 9000 --role receiver
+
+# Terminal 2 (Sender):
+./engine/bin/netcode_engine --protocol rlnc --file input.bin --port 9000 --role sender
+```
+
+---
+
+## 📊 Implemented vs. Planned Features
+
+| Feature | Status | Implementation Details |
+|---------|--------|------------------------|
+| **C11 Networking Engine** | **Implemented** | Strict C11 code in `engine/`, compiled with GCC on WSL/Linux |
+| **BSD UDP Sockets** | **Implemented** | Non-simulated real socket communication via `sendto`/`recvfrom` |
+| **GF(256) Arithmetic** | **Implemented** | Poly `0x11D`, generator `0x02`, log/exp tables, Russian Peasant verification |
+| **RLNC Coding** | **Implemented** | Systematic identity packets, random coded repair packets, coefficient vectors |
+| **Gaussian Elimination** | **Implemented** | Progressive forward elimination, pivot normalization, back-substitution |
+| **Stop-and-Wait RUDP** | **Implemented** | Monotonic sequence IDs, ACK validation, retransmission timeouts, duplicate filters |
+| **Configurable Impairment** | **Implemented** | 0-90% loss rate, reproducible SplitMix64 seeds, delay emulation |
+| **SHA-256 Verification** | **Implemented** | NIST SHA-256 hash checks and byte-for-byte comparisons |
+| **Telemetry Streaming** | **Implemented** | Real-time `EVENT_JSON` and `METRICS_JSON` stdout streaming to Node.js & Socket.IO |
+| **In-UI Visualizer** | **Implemented** | Interactive timeline, step-through, packet flight animations, rank display |
+| **Automated Tests** | **Implemented** | 7 C unit tests, 65 Node.js tests, 10 live UDP transfers, integration test |
+| **Sliding Window ARQ (Selective Repeat)** | *Planned* | Pipeline windowing baseline to compare against Stop-and-Wait ARQ |
+| **Multi-Hop Network Coding** | *Planned* | Re-encoding at intermediate relay nodes (butterfly topology) |
+| **SIMD AVX-512 GF(256)** | *Planned* | Vectorized Galois field matrix operations for gigabit throughput |

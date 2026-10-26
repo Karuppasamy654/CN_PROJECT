@@ -8,14 +8,23 @@
 #include <ctype.h>
 
 static char g_transfer_id[64] = "default";
+static double g_transfer_start_ms = 0.0;
 
 static double get_timestamp_ms(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+    double now = (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+    if (g_transfer_start_ms <= 0.0) {
+        g_transfer_start_ms = now;
+    }
+    double elapsed = now - g_transfer_start_ms;
+    return elapsed >= 0.0 ? elapsed : 0.0;
 }
 
 void events_init(const char *transfer_id) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    g_transfer_start_ms = (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
     if (transfer_id) {
         strncpy(g_transfer_id, transfer_id, sizeof(g_transfer_id) - 1);
         g_transfer_id[sizeof(g_transfer_id) - 1] = '\0';
@@ -42,6 +51,7 @@ void event_emit_source_block_created(int block_id, size_t offset, size_t len, co
 }
 
 void event_emit_packet_transmitted(uint16_t seq_id, uint16_t gen_id, const char *type_str,
+                                  int attempt,
                                   const uint8_t *coeffs, uint8_t K, size_t payload_len,
                                   const uint8_t *payload) {
     char coeff_json[256] = "[";
@@ -66,15 +76,15 @@ void event_emit_packet_transmitted(uint16_t seq_id, uint16_t gen_id, const char 
     strncat(data_json, "]", sizeof(data_json) - strlen(data_json) - 1);
 
     printf("EVENT_JSON:{\"transfer_id\":\"%s\",\"type\":\"packet_transmitted\",\"time\":%.2f,"
-           "\"seq_id\":%u,\"gen_id\":%u,\"pkt_type\":\"%s\",\"coeffs\":%s,\"payload_len\":%zu,\"data_preview\":%s}\n",
-           g_transfer_id, get_timestamp_ms(), seq_id, gen_id, type_str, coeff_json, payload_len, data_json);
+           "\"seq_id\":%u,\"gen_id\":%u,\"attempt\":%d,\"pkt_type\":\"%s\",\"coeffs\":%s,\"payload_len\":%zu,\"data_preview\":%s}\n",
+           g_transfer_id, get_timestamp_ms(), seq_id, gen_id, attempt > 0 ? attempt : 1, type_str, coeff_json, payload_len, data_json);
     fflush(stdout);
 }
 
-void event_emit_packet_dropped(uint16_t seq_id, uint16_t gen_id, const char *reason) {
+void event_emit_packet_dropped(uint16_t seq_id, uint16_t gen_id, int attempt, const char *reason) {
     printf("EVENT_JSON:{\"transfer_id\":\"%s\",\"type\":\"packet_dropped\",\"time\":%.2f,"
-           "\"seq_id\":%u,\"gen_id\":%u,\"reason\":\"%s\"}\n",
-           g_transfer_id, get_timestamp_ms(), seq_id, gen_id, reason);
+           "\"seq_id\":%u,\"gen_id\":%u,\"attempt\":%d,\"reason\":\"%s\"}\n",
+           g_transfer_id, get_timestamp_ms(), seq_id, gen_id, attempt > 0 ? attempt : 1, reason);
     fflush(stdout);
 }
 
@@ -126,17 +136,31 @@ void event_emit_decoder_step(uint16_t gen_id, const char *op_type, int pivot_row
     fflush(stdout);
 }
 
-void event_emit_rudp_ack(uint16_t ack_seq, uint16_t expected_seq) {
+void event_emit_rudp_ack(uint16_t ack_seq, uint16_t expected_seq, int attempt, double rtt_ms) {
     printf("EVENT_JSON:{\"transfer_id\":\"%s\",\"type\":\"rudp_ack\",\"time\":%.2f,"
-           "\"ack_seq\":%u,\"expected_seq\":%u}\n",
-           g_transfer_id, get_timestamp_ms(), ack_seq, expected_seq);
+           "\"ack_seq\":%u,\"expected_seq\":%u,\"attempt\":%d,\"rtt_ms\":%.2f}\n",
+           g_transfer_id, get_timestamp_ms(), ack_seq, expected_seq, attempt > 0 ? attempt : 1, rtt_ms);
     fflush(stdout);
 }
 
-void event_emit_rudp_retransmit(uint16_t seq_id, int retry_count) {
+void event_emit_rudp_ack_sent(uint16_t ack_seq) {
+    printf("EVENT_JSON:{\"transfer_id\":\"%s\",\"type\":\"rudp_ack_sent\",\"time\":%.2f,"
+           "\"ack_seq\":%u}\n",
+           g_transfer_id, get_timestamp_ms(), ack_seq);
+    fflush(stdout);
+}
+
+void event_emit_rudp_timeout(uint16_t seq_id, int attempt, int timeout_ms) {
+    printf("EVENT_JSON:{\"transfer_id\":\"%s\",\"type\":\"rudp_timeout\",\"time\":%.2f,"
+           "\"seq_id\":%u,\"attempt\":%d,\"timeout_ms\":%d}\n",
+           g_transfer_id, get_timestamp_ms(), seq_id, attempt > 0 ? attempt : 1, timeout_ms);
+    fflush(stdout);
+}
+
+void event_emit_rudp_retransmit(uint16_t seq_id, int retry_count, int attempt) {
     printf("EVENT_JSON:{\"transfer_id\":\"%s\",\"type\":\"rudp_retransmit\",\"time\":%.2f,"
-           "\"seq_id\":%u,\"retry_count\":%d}\n",
-           g_transfer_id, get_timestamp_ms(), seq_id, retry_count);
+           "\"seq_id\":%u,\"retry_count\":%d,\"attempt\":%d}\n",
+           g_transfer_id, get_timestamp_ms(), seq_id, retry_count, attempt > 0 ? attempt : (retry_count + 1));
     fflush(stdout);
 }
 

@@ -1,0 +1,59 @@
+<anim ver="netanim-3.109" filetype="animation" >
+<node id="0" sysId="0" locX="24" locY="63" />
+<node id="1" sysId="0" locX="64" locY="27" />
+<nu p="c" t="0" id="0" r="255" g="0" b="0" />
+<nu p="c" t="0" id="1" r="255" g="0" b="0" />
+<link fromId="0" toId="1" fd="10.1.1.1~00:00:00:00:00:01" td="10.1.1.2~00:00:00:00:00:02" ld="" />
+<nonp2plinkproperties id="0" ipAddress="127.0.0.1~00:00:00:00:00:00" channelType="Unknown channel" />
+<nonp2plinkproperties id="1" ipAddress="127.0.0.1~00:00:00:00:00:00" channelType="Unknown channel" />
+<ip n="0" >
+<address >10.1.1.1</address>
+
+<address >127.0.0.1</address>
+
+</ip>
+<ip n="0" >
+<address >10.1.1.1</address>
+
+<address >127.0.0.1</address>
+
+</ip>
+<ip n="1" >
+<address >10.1.1.2</address>
+
+<address >127.0.0.1</address>
+
+</ip>
+<ip n="1" >
+<address >10.1.1.2</address>
+
+<address >127.0.0.1</address>
+
+</ip>
+<ipv6 n="0" >
+<address >::1</address>
+
+</ipv6>
+<ipv6 n="1" >
+<address >::1</address>
+
+</ipv6>
+<nu p="s" t="0" id="0" w="1" h="1" />
+<nu p="s" t="0" id="1" w="1" h="1" />
+<ncs ncId="0" n="RemainingEnergy" t="DOUBLE" />
+<nu p="d" t="0" id="0" descr="Sender (Node 0)" />
+<nu p="d" t="0" id="1" descr="Receiver (Node 1)" />
+<nu p="c" t="0" id="0" r="0" g="120" b="255" />
+<nu p="c" t="0" id="1" r="40" g="200" b="80" />
+<p fId="0" fbTx="0.1" lbTx="0.1004528" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 0 protocol 17 offset (bytes) 0 flags [none] length: 564 10.1.1.1 &gt; 10.1.1.2) ns3::UdpHeader (length: 544 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=5 xfer=37465886 seq=0 gen=0 K=4 payloadSz=512 coeffs=4]) Payload (size=512)" tId="1" fbRx="0.105" lbRx="0.1054528" />
+<p fId="0" fbTx="0.11" lbTx="0.1104528" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 1 protocol 17 offset (bytes) 0 flags [none] length: 564 10.1.1.1 &gt; 10.1.1.2) ns3::UdpHeader (length: 544 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=5 xfer=37465886 seq=1 gen=0 K=4 payloadSz=512 coeffs=4]) Payload (size=512)" tId="1" fbRx="0.115" lbRx="0.1154528" />
+<p fId="0" fbTx="0.12" lbTx="0.1204528" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 2 protocol 17 offset (bytes) 0 flags [none] length: 564 10.1.1.1 &gt; 10.1.1.2) ns3::UdpHeader (length: 544 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=5 xfer=37465886 seq=2 gen=0 K=4 payloadSz=512 coeffs=4]) Payload (size=512)" tId="1" fbRx="0.125" lbRx="0.1254528" />
+<p fId="0" fbTx="0.13" lbTx="0.1304528" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 3 protocol 17 offset (bytes) 0 flags [none] length: 564 10.1.1.1 &gt; 10.1.1.2) ns3::UdpHeader (length: 544 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=5 xfer=37465886 seq=3 gen=0 K=4 payloadSz=512 coeffs=4]) Payload (size=512)" tId="1" fbRx="0.135" lbRx="0.1354528" />
+<p fId="1" fbTx="0.1354528" lbTx="0.1354928" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 0 protocol 17 offset (bytes) 0 flags [none] length: 48 10.1.1.2 &gt; 10.1.1.1) ns3::UdpHeader (length: 28 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=7 xfer=37465886 seq=0 gen=0 K=0 payloadSz=0 coeffs=0])" tId="0" fbRx="0.1404528" lbRx="0.1404928" />
+<p fId="0" fbTx="0.14" lbTx="0.1404528" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 4 protocol 17 offset (bytes) 0 flags [none] length: 564 10.1.1.1 &gt; 10.1.1.2) ns3::UdpHeader (length: 544 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=6 xfer=37465886 seq=4 gen=0 K=4 payloadSz=512 coeffs=4]) Payload (size=512)" tId="1" fbRx="0.145" lbRx="0.1454528" />
+<p fId="0" fbTx="0.1404928" lbTx="0.1405328" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 5 protocol 17 offset (bytes) 0 flags [none] length: 48 10.1.1.1 &gt; 10.1.1.2) ns3::UdpHeader (length: 28 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=8 xfer=37465886 seq=5 gen=1 K=0 payloadSz=0 coeffs=0])" tId="1" fbRx="0.1454928" lbRx="0.1455328" />
+<p fId="1" fbTx="0.1454528" lbTx="0.1454928" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 1 protocol 17 offset (bytes) 0 flags [none] length: 48 10.1.1.2 &gt; 10.1.1.1) ns3::UdpHeader (length: 28 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=7 xfer=37465886 seq=0 gen=0 K=0 payloadSz=0 coeffs=0])" tId="0" fbRx="0.1504528" lbRx="0.1504928" />
+<p fId="1" fbTx="0.1455328" lbTx="0.1455728" meta-info="ns3::PppHeader (Point-to-Point Protocol: IP (0x0021)) ns3::Ipv4Header (tos 0x0 DSCP Default ECN Not-ECT ttl 64 id 2 protocol 17 offset (bytes) 0 flags [none] length: 48 10.1.1.2 &gt; 10.1.1.1) ns3::UdpHeader (length: 28 9000 &gt; 9000) netcode::NetcodePacketHeader (NetcodePacketHeader [type=9 xfer=37465886 seq=0 gen=1 K=0 payloadSz=0 coeffs=0])" tId="0" fbRx="0.1505328" lbRx="0.1505728" />
+<nu p="p" t="0.25" id="0" x="10" y="50" />
+<nu p="p" t="0.25" id="1" x="90" y="50" />
+</anim>

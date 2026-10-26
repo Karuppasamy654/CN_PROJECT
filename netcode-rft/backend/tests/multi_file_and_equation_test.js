@@ -29,7 +29,10 @@ async function runTransfer(filename, content, protocol, lossRate = 10, delayMs =
   const transfer = await createRes.json();
 
   // Start transfer
-  await fetch(`http://localhost:5000/api/transfers/${transfer.id}/start`, { method: 'POST' });
+  const startRes = await fetch(`http://localhost:5000/api/transfers/${transfer.id}/start`, { method: 'POST' });
+  if (!startRes.ok) {
+    console.error(`Start transfer failed for ${transfer.id}: ${startRes.status} ${await startRes.text()}`);
+  }
 
   // Poll verification
   let finalVerify = null;
@@ -118,7 +121,7 @@ async function main() {
   console.log(`  -> Matrix Rank: ${res1.calcData.rank} (Required: ${res1.calcData.requiredRank})`);
   console.log(`  -> Gauss-Jordan Elimination Steps: ${res1.calcData.gaussJordan?.steps ? res1.calcData.gaussJordan.steps.length : 0}`);
   if (res1.calcData.gaussJordan?.steps && res1.calcData.gaussJordan.steps.length > 0) {
-    console.log(`     Step 1: ${res1.calcData.gaussJordan.steps[0].operation}`);
+    console.log(`     Step 1: ${res1.calcData.gaussJordan.steps[0].desc}`);
   }
 
   // -------------------------------------------------------------

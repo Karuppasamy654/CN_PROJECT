@@ -32,8 +32,8 @@ export default function NetworkConduitPanel({
     return () => mediaQuery.removeEventListener('change', handler);
   }, []);
 
-  // Animation duration (slow, clearly visible ~1.8 seconds)
-  const animDuration = prefersReducedMotion ? 0.1 : 1.8;
+  // Animation duration (responsive, visible ~0.85 seconds)
+  const animDuration = prefersReducedMotion ? 0.1 : 0.85;
 
   // -------------------------------------------------------------
   // ANIMATION QUEUE & STATE MACHINE
@@ -111,24 +111,33 @@ export default function NetworkConduitPanel({
     if (!events || events.length === 0) return;
 
     for (const e of events) {
-      if (e.type === 'packet_dropped') {
-        queueStateRef.current.outcomes.set(e.seq_id, { status: 'dropped', time: e.time });
+      const seqId = e.seq_id ?? e.packet_index ?? 0;
+      const genId = e.gen_id ?? 0;
+
+      if (e.type === 'packet_dropped' || e.type === 'phy_drop') {
+        queueStateRef.current.outcomes.set(seqId, { status: 'dropped', time: e.time });
       } else if (e.type === 'packet_received') {
-        queueStateRef.current.outcomes.set(e.seq_id, { status: 'received', time: e.time });
-      } else if (e.type === 'rudp_ack') {
-        queueStateRef.current.acks.set(e.ack_seq, { time: e.time });
-      } else if (e.type === 'decoder_matrix_update') {
-        setRlncRank({ rank: e.rank, required: e.required_rank || 4 });
-      } else if (e.type === 'packet_transmitted') {
-        const uniqueKey = `tx-${e.gen_id ?? 0}-${e.seq_id}-${e.time}`;
+        queueStateRef.current.outcomes.set(seqId, { status: 'received', time: e.time });
+      } else if (e.type === 'rudp_ack' || e.type === 'ack_sent' || e.type === 'ack_received') {
+        const ackId = e.ack_seq ?? seqId;
+        queueStateRef.current.acks.set(ackId, { time: e.time });
+      } else if (e.type === 'gen_ack_sent' || e.type === 'gen_ack_received') {
+        queueStateRef.current.acks.set(genId, { time: e.time });
+      } else if (e.type === 'decoder_matrix_update' || e.type === 'decoder_step') {
+        setRlncRank({ rank: e.rank, required: e.required_rank || transfer?.K || 4 });
+      } else if (e.type === 'packet_transmitted' || e.type === 'packet_sent') {
+        const uniqueKey = `tx-${genId}-${seqId}-${e.time ?? ''}-${e.retry ?? 0}`;
         if (!queueStateRef.current.enqueuedTxKeys.has(uniqueKey)) {
           queueStateRef.current.enqueuedTxKeys.add(uniqueKey);
           queueStateRef.current.pendingData.push({
-            seqId: e.seq_id,
-            genId: e.gen_id ?? 0,
-            payloadLen: e.payload_len,
+            seqId,
+            genId,
+            retry: e.retry ?? 0,
+            payloadLen: e.payload_len || 1024,
             time: e.time,
             uniqueKey,
+            coded: e.coded,
+            pkt_type: e.pkt_type,
           });
         }
       }
@@ -150,6 +159,16 @@ export default function NetworkConduitPanel({
     const hasInitEvent = events.some(e => e.type === 'handshake_step' && e.step >= 1);
     const hasReadyEvent = events.some(e => e.type === 'handshake_step' && e.step >= 2);
     const hasStartEvent = events.some(e => e.type === 'handshake_step' && e.step >= 3);
+    const hasAnyHandshake = hasInitEvent || hasReadyEvent || hasStartEvent;
+
+    // Direct transition for NS-3 / protocols without synthetic application handshake
+    if (!hasAnyHandshake && (animationPhase === 'IDLE' || animationPhase === 'HANDSHAKE_INIT')) {
+      if (queueStateRef.current.pendingData.length > 0 || isRunning) {
+        setAnimationPhase('DATA_TRANSMISSION');
+        setHandshakeStatus({ init: 'completed', ready: 'completed', start: 'completed' });
+        return;
+      }
+    }
 
     // =========================================================
     // PHASE A: THREE-WAY APPLICATION HANDSHAKE
@@ -157,7 +176,7 @@ export default function NetworkConduitPanel({
 
     // STEP 1: TRANSFER_INIT (Sender -> Receiver)
     if (
-      (isRunning || hasInitEvent) &&
+      hasInitEvent &&
       handshakeStatus.init === 'pending' &&
       (animationPhase === 'IDLE' || animationPhase === 'HANDSHAKE_INIT')
     ) {
@@ -262,7 +281,7 @@ export default function NetworkConduitPanel({
     // Only starts after Handshake is completely finished!
     // =========================================================
     if (
-      handshakeStatus.start === 'completed' &&
+      (!hasAnyHandshake || handshakeStatus.start === 'completed') &&
       (animationPhase === 'DATA_TRANSMISSION' || animationPhase === 'HANDSHAKE_COMPLETE')
     ) {
       // If there are pending data packets in the queue, process the next packet
@@ -277,9 +296,39 @@ export default function NetworkConduitPanel({
         const attempt = previousAttempts + 1;
         const isRetransmission = attempt > 1;
 
-        // Resolve outcome from engine events
-        const outcome = queueStateRef.current.outcomes.get(nextData.seqId);
-        const isDropped = outcome?.status === 'dropped';
+        // Resolve authentic outcome from engine events
+        const rxEventsForThis = events.filter(e =>
+          e.type === 'packet_received' &&
+          (e.seq_id === nextData.seqId || e.packet_index === nextData.seqId)
+        );
+
+        const explicitDrop = events.some(e =>
+          (e.type === 'packet_dropped' || e.type === 'phy_drop') &&
+          (e.seq_id === nextData.seqId || e.packet_index === nextData.seqId)
+        );
+
+        const totalTxForThis = events.filter(e =>
+          (e.type === 'packet_transmitted' || e.type === 'packet_sent') &&
+          (e.seq_id === nextData.seqId || e.packet_index === nextData.seqId)
+        ).length;
+
+        let isDropped = false;
+        if (protocol === 'rudp') {
+          // In RUDP: if there are subsequent attempts for this seqId, this attempt was lost/timed out
+          if (attempt < totalTxForThis) {
+            isDropped = true;
+          } else {
+            isDropped = rxEventsForThis.length === 0 || explicitDrop;
+          }
+        } else {
+          // In RLNC: packet is dropped if receiver never received it, or an explicit drop was recorded
+          if (rxEventsForThis.length === 0) {
+            isDropped = true;
+          } else {
+            isDropped = explicitDrop;
+          }
+        }
+
         const target = isDropped ? 'router' : 'receiver';
 
         const label = nextData.genId > 0
@@ -328,7 +377,7 @@ export default function NetworkConduitPanel({
                 genId: nextData.genId,
                 attempt,
                 status: finalStatus,
-                timestamp: outcome?.time || nextData.time,
+                timestamp: nextData.time,
               },
             ]);
 
@@ -383,7 +432,11 @@ export default function NetworkConduitPanel({
   ]);
 
   const lossPct = transfer?.lossRate !== undefined ? Math.round(Number(transfer.lossRate)) : 10;
-  const isHandshakeDone = handshakeStatus.start === 'completed';
+  const hasInitEvent = events.some(e => e.type === 'handshake_step' && e.step >= 1);
+  const hasReadyEvent = events.some(e => e.type === 'handshake_step' && e.step >= 2);
+  const hasStartEvent = events.some(e => e.type === 'handshake_step' && e.step >= 3);
+  const hasAnyHandshake = hasInitEvent || hasReadyEvent || hasStartEvent;
+  const isHandshakeDone = hasAnyHandshake ? handshakeStatus.start === 'completed' : true;
 
   return (
     <div
@@ -453,18 +506,18 @@ export default function NetworkConduitPanel({
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
           <span style={{ fontSize: '0.74rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-            Section 1: Application-Level UDP 3-Way Handshake
+            {hasAnyHandshake ? 'Section 1: Application-Level UDP 3-Way Handshake' : 'Section 1: UDP Socket & Network Channel'}
           </span>
           {isHandshakeDone && (
             <span style={{ fontSize: '0.7rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px', fontWeight: 700 }}>
               <CheckCircle2 size={13} color="#10b981" />
-              Handshake Completed
+              {hasAnyHandshake ? 'Handshake Completed' : 'Channel Initialized'}
             </span>
           )}
         </div>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
-          {/* Step 1: TRANSFER_INIT */}
+          {/* Step 1 */}
           <div
             style={{
               padding: '6px 10px',
@@ -489,9 +542,11 @@ export default function NetworkConduitPanel({
             }}
           >
             <div>
-              <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>Step 1 (Sender → Recv)</div>
+              <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>
+                {hasAnyHandshake ? 'Step 1 (Sender → Recv)' : 'Step 1 (Socket Init)'}
+              </div>
               <div style={{ fontSize: '0.72rem', fontWeight: 800, color: handshakeStatus.init === 'completed' ? '#38bdf8' : '#e2e8f0', fontFamily: 'var(--font-mono)' }}>
-                TRANSFER_INIT
+                {hasAnyHandshake ? 'TRANSFER_INIT' : 'SOCKET_BOUND'}
               </div>
             </div>
             <div>
@@ -507,7 +562,7 @@ export default function NetworkConduitPanel({
             </div>
           </div>
 
-          {/* Step 2: TRANSFER_READY */}
+          {/* Step 2 */}
           <div
             style={{
               padding: '6px 10px',
@@ -532,9 +587,11 @@ export default function NetworkConduitPanel({
             }}
           >
             <div>
-              <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>Step 2 (Recv → Sender)</div>
+              <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>
+                {hasAnyHandshake ? 'Step 2 (Recv → Sender)' : 'Step 2 (P2P Channel)'}
+              </div>
               <div style={{ fontSize: '0.72rem', fontWeight: 800, color: handshakeStatus.ready === 'completed' ? '#10b981' : '#e2e8f0', fontFamily: 'var(--font-mono)' }}>
-                TRANSFER_READY
+                {hasAnyHandshake ? 'TRANSFER_READY' : 'P2P_LINK_ACTIVE'}
               </div>
             </div>
             <div>
@@ -550,7 +607,7 @@ export default function NetworkConduitPanel({
             </div>
           </div>
 
-          {/* Step 3: TRANSFER_START */}
+          {/* Step 3 */}
           <div
             style={{
               padding: '6px 10px',
@@ -575,9 +632,11 @@ export default function NetworkConduitPanel({
             }}
           >
             <div>
-              <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>Step 3 (Sender → Recv)</div>
+              <div style={{ fontSize: '0.62rem', color: '#94a3b8' }}>
+                {hasAnyHandshake ? 'Step 3 (Sender → Recv)' : 'Step 3 (Recv Listener)'}
+              </div>
               <div style={{ fontSize: '0.72rem', fontWeight: 800, color: handshakeStatus.start === 'completed' ? '#38bdf8' : '#e2e8f0', fontFamily: 'var(--font-mono)' }}>
-                TRANSFER_START
+                {hasAnyHandshake ? 'TRANSFER_START' : 'PORT_LISTENING'}
               </div>
             </div>
             <div>
