@@ -9,6 +9,20 @@ const ENGINE_BIN = path.join(ROOT_DIR, 'engine/bin/netcode_engine');
 const NS3_BIN = process.env.NS3_BIN || '/home/muthu/ns-allinone-3.41/ns-3.41/build/scratch/netcode-rft/ns3.41-netcode-rft-default';
 const NETANIM_BIN = process.env.NETANIM_BIN || '/usr/local/bin/netanim';
 
+function toWslPath(inputPath) {
+  if (!inputPath) return '';
+  const resolved = path.resolve(inputPath).replace(/\\/g, '/');
+  if (process.platform !== 'win32') {
+    return resolved;
+  }
+  const match = resolved.match(/^([a-zA-Z]):\/(.*)$/);
+  if (match) {
+    const drive = match[1].toLowerCase();
+    return `/mnt/${drive}/${match[2]}`;
+  }
+  return resolved;
+}
+
 module.exports = {
   PORT: process.env.PORT || 5000,
   ROOT_DIR,
@@ -21,5 +35,6 @@ module.exports = {
   NETANIM_BIN,
   SIMULATOR_TYPE: process.env.SIMULATOR || 'ns3',
   MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB
+  toWslPath,
 };
 

@@ -1,23 +1,11 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { ENGINE_BIN, NS3_BIN, NETANIM_BIN, SIMULATOR_TYPE, ROOT_DIR, RESULTS_DIR } = require('../config');
+const { ENGINE_BIN, NS3_BIN, NETANIM_BIN, SIMULATOR_TYPE, ROOT_DIR, RESULTS_DIR, toWslPath } = require('../config');
 const store = require('./store');
 
 if (!fs.existsSync(RESULTS_DIR)) {
   fs.mkdirSync(RESULTS_DIR, { recursive: true });
-}
-
-function toWslPath(winPath) {
-  if (!winPath) return '';
-  const resolved = path.resolve(winPath).replace(/\\/g, '/');
-  // Match drive letter e.g. F:/... -> /mnt/f/...
-  const match = resolved.match(/^([a-zA-Z]):\/(.*)$/);
-  if (match) {
-    const drive = match[1].toLowerCase();
-    return `/mnt/${drive}/${match[2]}`;
-  }
-  return resolved;
 }
 
 class EngineManager {
@@ -58,36 +46,39 @@ class EngineManager {
     const isWin = process.platform === 'win32';
     const simType = transfer.simulatorType || SIMULATOR_TYPE || 'ns3';
     const traceFileName = `trace_${transferId}_${protocol.toLowerCase()}_loss${lossRate}.xml`;
-    const traceFilePathWsl = `/mnt/f/CN_project/netcode-rft/results/${traceFileName}`;
     const traceFilePathWin = path.join(RESULTS_DIR, traceFileName);
+    const traceFilePathWsl = toWslPath(traceFilePathWin);
 
-    let cmd = 'wsl';
+    const effectiveFile = isWin ? toWslPath(filePath) : filePath;
+    const effectiveOut = isWin ? toWslPath(outPath) : outPath;
+    const effectiveTrace = isWin ? traceFilePathWsl : traceFilePathWin;
+
+    let cmd = isWin ? 'wsl' : (simType === 'ns3' ? NS3_BIN : ENGINE_BIN);
     let args = [];
 
     if (simType === 'ns3') {
       const numericTransferId = (String(transferId).replace(/\D/g, '') || '1').slice(-9);
-      args = [
-        NS3_BIN,
+      const ns3Args = [
         `--protocol=${protocol.toUpperCase()}`,
         `--loss=${lossRate}`,
         `--delay=${delayMs}ms`,
         `--bandwidth=${bandwidth || '10Mbps'}`,
-        `--file=${toWslPath(filePath)}`,
-        `--out=${toWslPath(outPath)}`,
-        `--trace=${traceFilePathWsl}`,
+        `--file=${effectiveFile}`,
+        `--out=${effectiveOut}`,
+        `--trace=${effectiveTrace}`,
         `--k=${K}`,
         `--block-size=${blockSize}`,
         `--redundancy=${redundancy}`,
         `--transfer-id=${numericTransferId}`,
         `--seed=${seed}`,
       ];
+      args = isWin ? [NS3_BIN, ...ns3Args] : ns3Args;
     } else {
-      args = [
-        toWslPath(ENGINE_BIN),
+      const engineArgs = [
         '--transfer-id', transferId,
         '--protocol', protocol.toLowerCase(),
-        '--file', toWslPath(filePath),
-        '--out', toWslPath(outPath),
+        '--file', effectiveFile,
+        '--out', effectiveOut,
         '--port', String(port),
         '--loss', String(lossRate),
         '--delay', String(delayMs),
@@ -98,6 +89,7 @@ class EngineManager {
         '--seed', String(seed),
         '--role', 'all',
       ];
+      args = isWin ? [toWslPath(ENGINE_BIN), ...engineArgs] : engineArgs;
     }
 
     store.updateTransfer(transferId, {

@@ -6,7 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { z } = require('zod');
 
-const { UPLOADS_DIR, DOWNLOADS_DIR, MAX_FILE_SIZE } = require('../config');
+const { UPLOADS_DIR, DOWNLOADS_DIR, MAX_FILE_SIZE, toWslPath } = require('../config');
 const store = require('../services/store');
 const engineManager = require('../services/engineManager');
 
@@ -426,7 +426,7 @@ router.get('/traces', (req, res) => {
       return {
         filename: f,
         path: full,
-        wslPath: `/mnt/f/CN_project/netcode-rft/results/${f}`,
+        wslPath: toWslPath(full),
         sizeBytes: st.size,
         modified: st.mtime,
       };
