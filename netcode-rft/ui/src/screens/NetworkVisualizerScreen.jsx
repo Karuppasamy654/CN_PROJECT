@@ -249,7 +249,7 @@ export default function NetworkVisualizerScreen() {
             History
           </button>
           <button
-            onClick={() => navigate('/equations')}
+            onClick={() => navigate(selectedId ? `/equations?transferId=${selectedId}` : '/equations')}
             style={{
               background: '#1e293b',
               color: '#cbd5e1',

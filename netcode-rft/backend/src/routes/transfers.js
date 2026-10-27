@@ -6,7 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { z } = require('zod');
 
-const { UPLOADS_DIR, DOWNLOADS_DIR, MAX_FILE_SIZE, toWslPath } = require('../config');
+const { UPLOADS_DIR, DOWNLOADS_DIR, MAX_FILE_SIZE, toWslPath, toWinPath } = require('../config');
 const store = require('../services/store');
 const engineManager = require('../services/engineManager');
 
@@ -93,8 +93,8 @@ router.post('/transfers', upload.single('file'), async (req, res) => {
       return res.status(400).json({ error: 'Redundancy must be between 0 and 32' });
     }
 
-    const parsedSeed = parseInt(seed, 10);
-    const validSeed = (!isNaN(parsedSeed) && parsedSeed > 1) ? parsedSeed : (Math.floor(Math.random() * 65535) + 2);
+    const parsedSeed = req.body.seed !== undefined && req.body.seed !== '' ? parseInt(req.body.seed, 10) : NaN;
+    const validSeed = (!isNaN(parsedSeed) && parsedSeed >= 1) ? parsedSeed : (Math.floor(Math.random() * 65535) + 2);
 
     const filePath = req.file.path;
     const stats = fs.statSync(filePath);
@@ -159,12 +159,20 @@ router.post('/transfers/:id/cancel', (req, res) => {
 router.post('/transfers/:id/netanim', (req, res) => {
   const t = store.getTransfer(req.params.id);
   if (!t) return res.status(404).json({ error: 'Transfer not found' });
-  const tracePath = t.tracePath || `/mnt/f/CN_project/netcode-rft/results/trace_${t.id}_${(t.protocol || 'rlnc').toLowerCase()}_loss${t.lossRate}.xml`;
+  const { RESULTS_DIR } = require('../config');
+  const tracePath = t.tracePath || path.join(RESULTS_DIR, `trace_${t.id}_${(t.protocol || 'rlnc').toLowerCase()}_loss${t.lossRate}.xml`);
+  const traceWin = toWinPath(tracePath);
+  if (!fs.existsSync(traceWin)) {
+    return res.status(404).json({
+      success: false,
+      error: `Trace file does not exist on disk yet: ${tracePath}`,
+    });
+  }
   const success = engineManager.launchNetAnim(tracePath);
   res.json({
     success,
     message: success ? 'NetAnim desktop viewer opened with transfer trace' : 'Failed to launch NetAnim desktop',
-    tracePath,
+    tracePath: toWslPath(tracePath),
   });
 });
 
@@ -439,8 +447,80 @@ router.get('/traces', (req, res) => {
 // 13. POST /api/netanim/launch (Launch desktop NetAnim viewer for any trace)
 router.post('/netanim/launch', (req, res) => {
   const { tracePath } = req.body || {};
+  if (!tracePath) {
+    return res.status(400).json({ success: false, error: 'tracePath parameter is required' });
+  }
+  const traceWin = toWinPath(tracePath);
+  if (!fs.existsSync(traceWin)) {
+    return res.status(404).json({ success: false, error: `Trace file does not exist on disk: ${tracePath}` });
+  }
   const launched = engineManager.launchNetAnim(tracePath);
-  res.json({ success: launched, tracePath });
+  res.json({ success: launched, tracePath: toWslPath(tracePath) });
+});
+
+// 14. GET /api/traces/:filename/events (Parse discrete packet events from NetAnim XML)
+router.get('/traces/:filename/events', (req, res) => {
+  const { RESULTS_DIR } = require('../config');
+  const filename = path.basename(req.params.filename);
+  const fullPath = path.join(RESULTS_DIR, filename);
+  if (!fs.existsSync(fullPath)) {
+    return res.status(404).json({ error: 'Trace file not found' });
+  }
+
+  try {
+    const content = fs.readFileSync(fullPath, 'utf8');
+    const pRegex = /<p\s+([^>]+)>/g;
+    const events = [];
+    let match;
+    while ((match = pRegex.exec(content)) !== null) {
+      const attrsStr = match[1];
+      const getAttr = (name) => {
+        const m = attrsStr.match(new RegExp(`${name}="([^"]*)"`));
+        return m ? m[1] : null;
+      };
+      const fId = getAttr('fId');
+      const tId = getAttr('tId');
+      const fbTx = parseFloat(getAttr('fbTx') || '0');
+      const fbRx = parseFloat(getAttr('fbRx') || '0');
+      const meta = getAttr('meta-info') || '';
+
+      const nphMatch = meta.match(/NetcodePacketHeader\s*\[type=(\d+)\s+xfer=(\d+)\s+seq=(\d+)\s+gen=(\d+)/);
+      const pktType = nphMatch ? parseInt(nphMatch[1], 10) : null;
+      const seqId = nphMatch ? parseInt(nphMatch[3], 10) : null;
+      const genId = nphMatch ? parseInt(nphMatch[4], 10) : null;
+
+      let typeName = 'Data';
+      if (pktType === 1) typeName = 'DATA';
+      else if (pktType === 2) typeName = 'ACK';
+      else if (pktType === 5) typeName = 'Systematic';
+      else if (pktType === 6) typeName = 'Mixed (Coded)';
+      else if (pktType === 7) typeName = 'GenACK';
+      else if (pktType === 8) typeName = 'FIN';
+      else if (pktType === 9) typeName = 'FinACK';
+
+      events.push({
+        fromId: fId,
+        toId: tId,
+        direction: fId === '0' ? 'forward' : 'reverse',
+        txTimeSec: fbTx,
+        rxTimeSec: fbRx,
+        txTimeMs: fbTx * 1000,
+        rxTimeMs: fbRx * 1000,
+        seqId,
+        genId,
+        typeName,
+        meta,
+      });
+    }
+
+    res.json({
+      filename,
+      totalPackets: events.length,
+      events,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 module.exports = router;

@@ -25,11 +25,13 @@ public:
     void SetCallbacks(std::function<void(const std::string&)> eventCb,
                       std::function<void(bool success, double timeSec, uint32_t sent, uint32_t retries, uint32_t acks)> metricsCb);
 
-    uint32_t GetDataPacketsSent() const { return m_initialDataSent + m_totalRetries; }
+    uint32_t GetDataPacketsSent() const { return m_initialDataSent + m_dataRetransmissions; }
     uint32_t GetInitialDataSent() const { return m_initialDataSent; }
-    uint32_t GetRetransmissionsSent() const { return m_totalRetries; }
-    uint32_t GetFinSent() const { return m_finSent; }
-    uint32_t GetTotalSent() const { return GetDataPacketsSent() + m_finSent; }
+    uint32_t GetDataRetransmissions() const { return m_dataRetransmissions; }
+    uint32_t GetFinRetransmissions() const { return m_finRetransmissions; }
+    uint32_t GetRetransmissionsSent() const { return m_dataRetransmissions + m_finRetransmissions; }
+    uint32_t GetFinSent() const { return m_finSent + m_finRetransmissions; }
+    uint32_t GetTotalSent() const { return GetDataPacketsSent() + GetFinSent(); }
     uint32_t GetDataAcksReceived() const { return m_totalAcks; }
     uint32_t GetFinAcksReceived() const { return m_finAcksReceived; }
 
@@ -58,6 +60,8 @@ private:
 
     // Metrics
     uint32_t m_initialDataSent;
+    uint32_t m_dataRetransmissions;
+    uint32_t m_finRetransmissions;
     uint32_t m_totalRetries;
     uint32_t m_finSent;
     uint32_t m_totalAcks;

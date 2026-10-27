@@ -163,6 +163,21 @@ export default function RlncVsRudpComparisonScreen() {
           >
             Equation Lab
           </button>
+          <button
+            onClick={() => navigate('/netanim')}
+            style={{
+              background: '#1e293b',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              padding: '7px 16px',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            NetAnim
+          </button>
         </div>
       </header>
 

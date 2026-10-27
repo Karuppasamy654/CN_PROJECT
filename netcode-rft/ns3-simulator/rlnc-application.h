@@ -93,7 +93,7 @@ struct RlncGenDecoder {
 
     RlncGenDecoder(uint8_t k = 4, uint32_t bSize = 1024);
     bool AddPacket(const std::vector<uint8_t> &coeffs, const uint8_t *payload, uint16_t genId,
-                   std::function<void(const std::string&)> eventCb, uint32_t transferId);
+                   std::function<void(const std::string&)> eventCb, uint32_t transferId, uint32_t seqNum = 0);
     bool RecoverBlocks(std::vector<std::vector<uint8_t>> &recoveredBlocks);
 };
 

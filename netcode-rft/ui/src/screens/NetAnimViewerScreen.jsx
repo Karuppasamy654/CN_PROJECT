@@ -1,14 +1,20 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { Play, ExternalLink, FileText, Monitor, CheckCircle2, RefreshCw, Activity, ArrowRight, Info, Eye } from 'lucide-react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Play, ExternalLink, FileText, Monitor, CheckCircle2, RefreshCw, Activity, ArrowRight, Info, Eye, Copy, Check, AlertTriangle, Radio } from 'lucide-react';
 
 export default function NetAnimViewerScreen() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const urlTransferId = searchParams.get('transferId');
+
   const [traces, setTraces] = useState([]);
   const [selectedTrace, setSelectedTrace] = useState('');
   const [launching, setLaunching] = useState(false);
   const [launchStatus, setLaunchStatus] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [traceEvents, setTraceEvents] = useState([]);
+  const [loadingEvents, setLoadingEvents] = useState(false);
 
   const fetchTraces = async () => {
     try {
@@ -18,8 +24,17 @@ export default function NetAnimViewerScreen() {
         const data = await res.json();
         const list = data.traces || [];
         setTraces(list);
-        if (list.length > 0 && !selectedTrace) {
-          setSelectedTrace(list[0].wslPath || list[0].path);
+        if (list.length > 0) {
+          if (urlTransferId) {
+            const matched = list.find(t => t.filename.includes(urlTransferId));
+            if (matched) {
+              setSelectedTrace(matched.wslPath || matched.path);
+            } else if (!selectedTrace) {
+              setSelectedTrace(list[0].wslPath || list[0].path);
+            }
+          } else if (!selectedTrace) {
+            setSelectedTrace(list[0].wslPath || list[0].path);
+          }
         }
       }
     } catch (err) {
@@ -31,27 +46,59 @@ export default function NetAnimViewerScreen() {
 
   useEffect(() => {
     fetchTraces();
-  }, []);
+  }, [urlTransferId]);
+
+  // Fetch parsed discrete packet events for the selected trace
+  useEffect(() => {
+    if (!selectedTrace) {
+      setTraceEvents([]);
+      return;
+    }
+    const filename = selectedTrace.split(/[\/\\]/).pop();
+    if (!filename) return;
+
+    setLoadingEvents(true);
+    fetch(`/api/traces/${filename}/events`)
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (data && data.events) {
+          setTraceEvents(data.events);
+        } else {
+          setTraceEvents([]);
+        }
+      })
+      .catch(() => setTraceEvents([]))
+      .finally(() => setLoadingEvents(false));
+  }, [selectedTrace]);
+
+  const copyWslPath = (path) => {
+    if (!path) return;
+    navigator.clipboard.writeText(path);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   const handleLaunch = async (tracePath) => {
+    const target = tracePath || selectedTrace;
+    if (!target) return;
     try {
       setLaunching(true);
       setLaunchStatus(null);
       const res = await fetch('/api/netanim/launch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tracePath: tracePath || selectedTrace }),
+        body: JSON.stringify({ tracePath: target }),
       });
       const data = await res.json();
-      if (data.success) {
+      if (res.ok && data.success) {
         setLaunchStatus({
           type: 'success',
-          message: 'NetAnim desktop application launched successfully via WSLg!',
+          message: `NetAnim desktop application launched successfully with trace: ${data.tracePath || target}`,
         });
       } else {
         setLaunchStatus({
-          type: 'info',
-          message: 'NetAnim launch requested. If the desktop window does not appear, ensure WSLg or an X11 server is active.',
+          type: 'error',
+          message: data.error || 'Failed to launch NetAnim desktop. Ensure the trace file exists.',
         });
       }
     } catch (err) {
@@ -125,9 +172,43 @@ export default function NetAnimViewerScreen() {
             <h2 style={{ fontSize: '1.35rem', fontWeight: 700, margin: '12px 0 8px 0', color: '#ffffff' }}>
               Launch Official NetAnim Desktop Application
             </h2>
-            <p style={{ color: '#cbd5e1', fontSize: '0.92rem', lineHeight: 1.5, margin: 0 }}>
+            <p style={{ color: '#cbd5e1', fontSize: '0.92rem', lineHeight: 1.5, margin: '0 0 14px 0' }}>
               NetAnim is the official offline animator for NS-3 simulations. It parses the generated XML trace file, visualizes node positions (Sender Node 0, Receiver Node 1), animates packet transmissions across the point-to-point link, and provides packet statistics and timeline scrubbing.
             </p>
+
+            {/* Selected Trace WSL Path Display */}
+            {selectedTrace && (
+              <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '12px', flexWrap: 'wrap' }}>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div style={{ fontSize: '0.75rem', color: '#38bdf8', fontWeight: 600, textTransform: 'uppercase' }}>Selected Trace (WSL Path)</div>
+                  <div style={{ fontSize: '0.82rem', fontFamily: 'monospace', color: '#f1f5f9', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {selectedTrace}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => copyWslPath(selectedTrace)}
+                  style={{
+                    background: copied ? '#059669' : '#0284c7',
+                    color: '#ffffff',
+                    border: 'none',
+                    padding: '6px 12px',
+                    borderRadius: '6px',
+                    cursor: 'pointer',
+                    fontSize: '0.78rem',
+                    fontWeight: 600,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    flexShrink: 0,
+                    transition: 'all 0.2s',
+                  }}
+                >
+                  {copied ? <Check size={14} /> : <Copy size={14} />}
+                  <span>{copied ? 'Copied WSL Path' : 'Copy WSL Path'}</span>
+                </button>
+              </div>
+            )}
           </div>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', minWidth: '260px' }}>
@@ -158,9 +239,17 @@ export default function NetAnimViewerScreen() {
           </div>
         </div>
 
+        {/* Tip for Avoiding "Trace file is invalid" */}
+        <div style={{ marginTop: '16px', padding: '10px 14px', background: 'rgba(56, 189, 248, 0.08)', border: '1px solid rgba(56, 189, 248, 0.25)', borderRadius: '6px', color: '#93c5fd', fontSize: '0.8rem', display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+          <Info size={16} style={{ flexShrink: 0, marginTop: '2px' }} />
+          <div>
+            <strong>Notice on NetAnim Path Resolution:</strong> NetAnim runs inside Ubuntu via WSL. The launch button automatically feeds the genuine WSL POSIX path to NetAnim. If you ever use NetAnim's <em>File → Open</em> dialog manually, paste the copied <strong>WSL Path</strong> (starting with <code>/mnt/f/...</code>). Windows paths like <code>F:\...</code> cannot be resolved by Linux and will cause NetAnim to show <em>"Trace file is invalid"</em>.
+          </div>
+        </div>
+
         {launchStatus && (
           <div style={{
-            marginTop: '16px',
+            marginTop: '12px',
             padding: '12px 16px',
             borderRadius: '6px',
             background: launchStatus.type === 'success' ? '#064e3b' : (launchStatus.type === 'error' ? '#7f1d1d' : '#1e3a5f'),
@@ -171,7 +260,7 @@ export default function NetAnimViewerScreen() {
             alignItems: 'center',
             gap: '8px',
           }}>
-            <Info size={18} /> {launchStatus.message}
+            {launchStatus.type === 'error' ? <AlertTriangle size={18} /> : <Info size={18} />} {launchStatus.message}
           </div>
         )}
       </div>
@@ -291,6 +380,79 @@ export default function NetAnimViewerScreen() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Discrete Packet Events Table Correlating to NetAnim */}
+      <div style={{ background: '#0f172a', border: '1px solid #1e3a5f', borderRadius: '10px', padding: '20px', marginTop: '24px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+          <div>
+            <h3 style={{ fontSize: '1.1rem', fontWeight: 700, margin: 0, color: '#38bdf8', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <Radio size={20} color="#38bdf8" /> NetAnim Discrete-Event Packet Correlation Table
+            </h3>
+            <p style={{ margin: '4px 0 0 0', color: '#94a3b8', fontSize: '0.8rem' }}>
+              Correlates NS-3 NetAnim XML <code>&lt;p&gt;</code> packets with backend telemetry events. Notice that NetAnim visualizes physical transit and drops across the 10 Mbps / 20 ms link; RLNC matrix decoding is performed at Node 1 (Receiver).
+            </p>
+          </div>
+          <span style={{ fontSize: '0.8rem', color: '#cbd5e1', background: '#1e293b', padding: '4px 10px', borderRadius: '5px', border: '1px solid #334155' }}>
+            {traceEvents.length} Total Packets in Trace
+          </span>
+        </div>
+
+        {loadingEvents ? (
+          <div style={{ padding: '24px', textAlign: 'center', color: '#94a3b8', fontSize: '0.85rem' }}>
+            Loading trace packet events...
+          </div>
+        ) : traceEvents.length === 0 ? (
+          <div style={{ padding: '24px', textAlign: 'center', color: '#64748b', fontSize: '0.85rem' }}>
+            Select a NetAnim XML trace above to inspect its discrete packet transmission and reception events.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto', maxHeight: '360px', overflowY: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.78rem', fontFamily: 'var(--font-mono)' }}>
+              <thead>
+                <tr style={{ background: '#14253d', color: '#94a3b8', textAlign: 'left', borderBottom: '1px solid #1e3a5f' }}>
+                  <th style={{ padding: '8px 12px' }}>Event Time (Tx)</th>
+                  <th style={{ padding: '8px 12px' }}>Receive Time (Rx)</th>
+                  <th style={{ padding: '8px 12px' }}>Path</th>
+                  <th style={{ padding: '8px 12px' }}>Packet Type</th>
+                  <th style={{ padding: '8px 12px' }}>Seq / Gen</th>
+                  <th style={{ padding: '8px 12px' }}>NetAnim Channel Correlation</th>
+                </tr>
+              </thead>
+              <tbody>
+                {traceEvents.map((ev, idx) => {
+                  const isForward = ev.direction === 'forward';
+                  return (
+                    <tr key={idx} style={{ borderBottom: '1px solid rgba(30, 58, 95, 0.4)', background: idx % 2 === 0 ? 'rgba(15, 23, 42, 0.4)' : 'transparent' }}>
+                      <td style={{ padding: '6px 12px', color: '#38bdf8' }}>+{ev.txTimeMs.toFixed(2)} ms</td>
+                      <td style={{ padding: '6px 12px', color: '#10b981' }}>+{ev.rxTimeMs.toFixed(2)} ms</td>
+                      <td style={{ padding: '6px 12px' }}>
+                        <span style={{
+                          padding: '2px 6px',
+                          borderRadius: '4px',
+                          fontSize: '0.7rem',
+                          background: isForward ? 'rgba(56, 189, 248, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+                          color: isForward ? '#38bdf8' : '#34d399',
+                        }}>
+                          {isForward ? 'Node 0 → Node 1 (Forward)' : 'Node 1 → Node 0 (Reverse ACK)'}
+                        </span>
+                      </td>
+                      <td style={{ padding: '6px 12px', fontWeight: 600, color: '#fff' }}>
+                        {ev.typeName}
+                      </td>
+                      <td style={{ padding: '6px 12px', color: '#cbd5e1' }}>
+                        {ev.seqId !== null ? `Seq #${ev.seqId + 1} (Gen ${ev.genId ?? 0})` : 'Control'}
+                      </td>
+                      <td style={{ padding: '6px 12px', color: '#64748b', fontSize: '0.72rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {ev.meta.slice(0, 90)}...
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );

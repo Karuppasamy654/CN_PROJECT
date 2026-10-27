@@ -208,8 +208,8 @@ export default function PacketFlow({ transfer, events, playbackIndex }) {
             <Server size={22} color="#fbbf24" />
           </div>
 
-          <span style={{ fontSize: '0.74rem', fontWeight: 700, marginTop: '3px', color: '#fbbf24' }}>Network Router</span>
-          <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>Impairment Channel</span>
+          <span style={{ fontSize: '0.74rem', fontWeight: 700, marginTop: '3px', color: '#fbbf24' }}>P2P Channel</span>
+          <span style={{ fontSize: '0.62rem', color: 'var(--text-muted)' }}>RateErrorModel Drop Sink</span>
 
           {/* Visible Impairment Drop Indicator at Router */}
           <AnimatePresence>

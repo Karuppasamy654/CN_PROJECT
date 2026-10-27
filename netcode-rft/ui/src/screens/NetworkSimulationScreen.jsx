@@ -29,6 +29,7 @@ export default function NetworkSimulationScreen() {
   const [blockSize, setBlockSize] = useState('1024');
   const [K, setK] = useState('4');
   const [redundancy, setRedundancy] = useState('2');
+  const [seed, setSeed] = useState('1');
   const [autoNetAnim, setAutoNetAnim] = useState(true);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -61,6 +62,29 @@ export default function NetworkSimulationScreen() {
     setSelectedFile(demoFile);
   };
 
+  const handleLoadEmpty = () => {
+    const demoBlob = new Blob([], { type: 'application/octet-stream' });
+    const demoFile = new window.File([demoBlob], 'empty_0byte.txt', { type: 'text/plain' });
+    setSelectedFile(demoFile);
+  };
+
+  const handleLoadText = () => {
+    const textData = new TextEncoder().encode('NetCode-RFT Computer Networks Verified RLNC Transfer\nTimestamp: ' + new Date().toISOString() + '\nAutonomous network coding simulation test.');
+    const demoBlob = new Blob([textData], { type: 'text/plain' });
+    const demoFile = new window.File([demoBlob], 'network_test.txt', { type: 'text/plain' });
+    setSelectedFile(demoFile);
+  };
+
+  const handleLoadBinary = () => {
+    const data = new Uint8Array(4096);
+    for (let i = 0; i < 4096; i++) {
+      data[i] = ((i * 131 + 71) % 256);
+    }
+    const demoBlob = new Blob([data], { type: 'application/octet-stream' });
+    const demoFile = new window.File([demoBlob], 'binary_payload.bin', { type: 'application/octet-stream' });
+    setSelectedFile(demoFile);
+  };
+
   const handleStart = async () => {
     try {
       setIsSubmitting(true);
@@ -88,6 +112,7 @@ export default function NetworkSimulationScreen() {
       fd.append('blockSize', blockSize);
       fd.append('K', K);
       fd.append('redundancy', redundancy);
+      fd.append('seed', seed);
       fd.append('autoNetAnim', autoNetAnim ? 'true' : 'false');
 
       await startTransfer(fd);
@@ -113,9 +138,9 @@ export default function NetworkSimulationScreen() {
   const totalExpectedBlocks = receiverState.expectedBlocks;
   const currentK = transfer?.K || 4;
   const totalGenerations = receiverState.expectedGenerations;
-  const sentCount = receiverState.physicalTransmissions || metrics?.data_packets_sent || metrics?.total_sent_packets || 0;
-  const lostCount = receiverState.droppedPacketCount || metrics?.total_phy_drops || (metrics?.data_packets_sent > metrics?.data_packets_received ? metrics.data_packets_sent - metrics.data_packets_received : 0);
-  const recvCount = receiverState.receivedPacketCount || metrics?.data_packets_received || 0;
+  const sentCount = receiverState.physicalTransmissions ?? metrics?.data_packets_sent ?? metrics?.total_sent_packets ?? 0;
+  const lostCount = receiverState.forwardDroppedCount ?? receiverState.droppedPacketCount ?? metrics?.forward_phy_drops ?? metrics?.total_phy_drops ?? 0;
+  const recvCount = receiverState.receivedPacketCount ?? metrics?.data_packets_received ?? 0;
 
   const systematicSent = receiverState.systematicSent || (protocol === 'rlnc' ? (metrics?.data_packets_sent ? Math.min(metrics.data_packets_sent, totalExpectedBlocks || 4) : 0) : 0);
   const redundancySent = receiverState.redundancySent || (protocol === 'rlnc' ? (metrics?.total_coded_packets || 0) : 0);
@@ -191,7 +216,7 @@ export default function NetworkSimulationScreen() {
             RLNC vs RUDP Comparison
           </button>
           <button
-            onClick={() => navigate('/visualizer')}
+            onClick={() => navigate(transfer?.id ? `/visualizer?transferId=${transfer.id}` : '/visualizer')}
             style={{
               background: '#1e293b',
               color: '#cbd5e1',
@@ -221,7 +246,7 @@ export default function NetworkSimulationScreen() {
             Experiment History
           </button>
           <button
-            onClick={() => navigate('/equations')}
+            onClick={() => navigate(transfer?.id ? `/equations?transferId=${transfer.id}` : '/equations')}
             style={{
               background: '#1e293b',
               color: '#cbd5e1',
@@ -234,6 +259,21 @@ export default function NetworkSimulationScreen() {
             }}
           >
             Equation Lab
+          </button>
+          <button
+            onClick={() => navigate(transfer?.id ? `/netanim?transferId=${transfer.id}` : '/netanim')}
+            style={{
+              background: '#1e293b',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              padding: '7px 16px',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            NetAnim
           </button>
         </div>
       </header>
@@ -337,23 +377,73 @@ export default function NetworkSimulationScreen() {
                 Choose File
               </button>
 
-              <button
-                type="button"
-                onClick={handleLoadDemo}
-                style={{
-                  width: '100%',
-                  padding: '5px',
-                  background: 'rgba(56, 189, 248, 0.1)',
-                  border: '1px solid rgba(56, 189, 248, 0.3)',
-                  color: '#38bdf8',
-                  borderRadius: '6px',
-                  fontSize: '0.72rem',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-              >
-                ⚡ Load Sample File (256 KB / 4 KB Demo)
-              </button>
+              {/* Quick Preset Buttons */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px', marginTop: '6px' }}>
+                <button
+                  type="button"
+                  onClick={handleLoadEmpty}
+                  style={{
+                    padding: '5px',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#f87171',
+                    borderRadius: '5px',
+                    fontSize: '0.7rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ⚡ 0B Empty
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoadText}
+                  style={{
+                    padding: '5px',
+                    background: 'rgba(16, 185, 129, 0.1)',
+                    border: '1px solid rgba(16, 185, 129, 0.3)',
+                    color: '#34d399',
+                    borderRadius: '5px',
+                    fontSize: '0.7rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ⚡ Text File
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoadBinary}
+                  style={{
+                    padding: '5px',
+                    background: 'rgba(168, 85, 247, 0.1)',
+                    border: '1px solid rgba(168, 85, 247, 0.3)',
+                    color: '#c084fc',
+                    borderRadius: '5px',
+                    fontSize: '0.7rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ⚡ Binary (4KB)
+                </button>
+                <button
+                  type="button"
+                  onClick={handleLoadDemo}
+                  style={{
+                    padding: '5px',
+                    background: 'rgba(56, 189, 248, 0.1)',
+                    border: '1px solid rgba(56, 189, 248, 0.3)',
+                    color: '#38bdf8',
+                    borderRadius: '5px',
+                    fontSize: '0.7rem',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  ⚡ Demo (4KB)
+                </button>
+              </div>
             </div>
 
             {/* Simulation Settings Card */}
@@ -752,9 +842,15 @@ export default function NetworkSimulationScreen() {
                   <span style={{ color: '#10b981', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{recvCount}</span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8' }}>
-                  <span>Packets Lost (Dropped)</span>
+                  <span>Data Packets Dropped (Forward)</span>
                   <span style={{ color: lostCount > 0 ? '#f87171' : '#94a3b8', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{lostCount}</span>
                 </div>
+                {receiverState.reverseDroppedCount > 0 && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: '#64748b', fontSize: '0.74rem', paddingLeft: '8px' }}>
+                    <span>└─ Control ACK Drops (Reverse)</span>
+                    <span style={{ color: '#f59e0b', fontFamily: 'var(--font-mono)' }}>{receiverState.reverseDroppedCount}</span>
+                  </div>
+                )}
                 <div style={{ display: 'flex', justifyContent: 'space-between', color: '#94a3b8' }}>
                   <span>Received Payload Bytes</span>
                   <span style={{ color: '#38bdf8', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>{receiverState.receivedPayloadBytes} B</span>

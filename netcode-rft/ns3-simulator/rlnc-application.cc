@@ -11,6 +11,48 @@ namespace netcode {
 
 NS_LOG_COMPONENT_DEFINE("NetcodeRlncApplication");
 
+static std::string FormatEquation(const std::vector<uint8_t> &coeffs, uint8_t K) {
+    std::ostringstream oss;
+    bool first = true;
+    for (size_t i = 0; i < coeffs.size() && i < (size_t)K; i++) {
+        uint8_t c = coeffs[i];
+        if (c == 0) continue;
+        if (!first) oss << " ⊕ ";
+        first = false;
+        if (c == 1) {
+            oss << "x" << (i + 1);
+        } else {
+            oss << (int)c << "·x" << (i + 1);
+        }
+    }
+    if (first) return "0";
+    return oss.str();
+}
+
+template <typename T>
+static std::string VectorToJsonArray(const std::vector<T> &vec) {
+    std::ostringstream oss;
+    oss << "[";
+    for (size_t i = 0; i < vec.size(); i++) {
+        if (i > 0) oss << ",";
+        oss << (int)vec[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
+static std::string PreviewToJsonArray(const uint8_t *data, size_t len, size_t maxLen = 6) {
+    std::ostringstream oss;
+    oss << "[";
+    size_t count = std::min(len, maxLen);
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) oss << ",";
+        oss << (int)data[i];
+    }
+    oss << "]";
+    return oss.str();
+}
+
 // ---------------- RlncGenDecoder ----------------
 
 RlncGenDecoder::RlncGenDecoder(uint8_t k, uint32_t bSize)
@@ -26,9 +68,33 @@ RlncGenDecoder::RlncGenDecoder(uint8_t k, uint32_t bSize)
 }
 
 bool RlncGenDecoder::AddPacket(const std::vector<uint8_t> &coeffs, const uint8_t *payload, uint16_t genId,
-                              std::function<void(const std::string&)> eventCb, uint32_t transferId) {
+                              std::function<void(const std::string&)> eventCb, uint32_t transferId, uint32_t seqNum) {
+    int rankBefore = rank;
+    double nowSec = ns3::Simulator::Now().GetSeconds();
+
+    std::string eqStr = FormatEquation(coeffs, K);
+    std::string coeffsJson = VectorToJsonArray(coeffs);
+    std::string payloadPreviewJson = payload ? PreviewToJsonArray(payload, blockSize, 6) : "[]";
+
     if (isComplete) {
         dependentCount++;
+        std::ostringstream oss;
+        oss << "EVENT_JSON:{\"transfer_id\":\"" << transferId
+            << "\",\"type\":\"decoder_matrix_update\",\"protocol\":\"rlnc\",\"time\":" << nowSec
+            << ",\"seq_id\":" << seqNum
+            << ",\"packet_id\":" << seqNum
+            << ",\"gen_id\":" << genId
+            << ",\"rank\":" << rank
+            << ",\"rank_before\":" << rankBefore
+            << ",\"rank_after\":" << rank
+            << ",\"required_rank\":" << (int)K
+            << ",\"innovative\":false"
+            << ",\"equation\":\"" << eqStr << "\""
+            << ",\"coeffs\":" << coeffsJson
+            << ",\"payload_preview\":" << payloadPreviewJson
+            << ",\"operations\":[\"Generation already complete with full rank " << (int)K << "\"]}";
+        if (eventCb) eventCb(oss.str());
+        std::cout << oss.str() << std::endl;
         return false;
     }
 
@@ -42,7 +108,7 @@ bool RlncGenDecoder::AddPacket(const std::vector<uint8_t> &coeffs, const uint8_t
         std::memcpy(&row[K], payload, blockSize);
     }
 
-    double nowSec = ns3::Simulator::Now().GetSeconds();
+    std::vector<std::string> ops;
 
     // Progressive Gauss-Jordan elimination against existing pivot rows
     for (int i = 0; i < K; i++) {
@@ -54,12 +120,18 @@ bool RlncGenDecoder::AddPacket(const std::vector<uint8_t> &coeffs, const uint8_t
 
                 // Normalize this row so pivot is 1
                 gf256_row_mul(row.data(), K + blockSize, inv_pivot);
+                ops.push_back("Normalize Row " + std::to_string(i + 1) + ": R" + std::to_string(i + 1) +
+                              " ← R" + std::to_string(i + 1) + " ⊗ " + std::to_string((int)inv_pivot) +
+                              " (inv of " + std::to_string((int)pivot) + ")");
 
                 // Eliminate all other existing pivot columns from this new pivot row
                 for (int c2 = 0; c2 < K; c2++) {
                     if (c2 != i && hasRow[c2] && row[c2] != 0) {
                         uint8_t factor = row[c2];
                         gf256_row_madd(row.data(), matrix[c2].data(), K + blockSize, factor);
+                        ops.push_back("Forward Eliminate Col " + std::to_string(c2 + 1) + " from Row " + std::to_string(i + 1) +
+                                      ": R" + std::to_string(i + 1) + " ← R" + std::to_string(i + 1) + " ⊕ (" +
+                                      std::to_string((int)factor) + " ⊗ R" + std::to_string(c2 + 1) + ")");
                     }
                 }
 
@@ -68,6 +140,9 @@ bool RlncGenDecoder::AddPacket(const std::vector<uint8_t> &coeffs, const uint8_t
                     if (r != i && hasRow[r] && matrix[r][i] != 0) {
                         uint8_t factor = matrix[r][i];
                         gf256_row_madd(matrix[r].data(), row.data(), K + blockSize, factor);
+                        ops.push_back("Back-Substitute Col " + std::to_string(i + 1) + " from Row " + std::to_string(r + 1) +
+                                      ": R" + std::to_string(r + 1) + " ← R" + std::to_string(r + 1) + " ⊕ (" +
+                                      std::to_string((int)factor) + " ⊗ R" + std::to_string(i + 1) + ")");
                     }
                 }
 
@@ -81,13 +156,56 @@ bool RlncGenDecoder::AddPacket(const std::vector<uint8_t> &coeffs, const uint8_t
                     isComplete = true;
                 }
 
+                // Construct current matrix A and matrix Y preview JSON
+                std::ostringstream aOss, yOss;
+                aOss << "[";
+                yOss << "[";
+                for (int r = 0; r < K; r++) {
+                    if (r > 0) { aOss << ","; yOss << ","; }
+                    aOss << "[";
+                    yOss << "[";
+                    for (int c = 0; c < K; c++) {
+                        if (c > 0) aOss << ",";
+                        aOss << (int)(hasRow[r] ? matrix[r][c] : 0);
+                    }
+                    aOss << "]";
+                    for (size_t b = 0; b < 6 && b < blockSize; b++) {
+                        if (b > 0) yOss << ",";
+                        yOss << (int)(hasRow[r] ? matrix[r][K + b] : 0);
+                    }
+                    yOss << "]";
+                }
+                aOss << "]";
+                yOss << "]";
+
+                // Construct operations JSON
+                std::ostringstream opsOss;
+                opsOss << "[";
+                for (size_t opIdx = 0; opIdx < ops.size(); opIdx++) {
+                    if (opIdx > 0) opsOss << ",";
+                    opsOss << "\"" << ops[opIdx] << "\"";
+                }
+                opsOss << "]";
+
                 // Emit event
                 std::ostringstream oss;
                 oss << "EVENT_JSON:{\"transfer_id\":\"" << transferId
                     << "\",\"type\":\"decoder_matrix_update\",\"protocol\":\"rlnc\",\"time\":" << nowSec
-                    << ",\"gen_id\":" << genId << ",\"rank\":" << rank
+                    << ",\"seq_id\":" << seqNum
+                    << ",\"packet_id\":" << seqNum
+                    << ",\"gen_id\":" << genId
+                    << ",\"rank\":" << rank
+                    << ",\"rank_before\":" << rankBefore
+                    << ",\"rank_after\":" << rank
                     << ",\"required_rank\":" << (int)K
-                    << ",\"innovative\":true}";
+                    << ",\"innovative\":true"
+                    << ",\"equation\":\"" << eqStr << "\""
+                    << ",\"coeffs\":" << coeffsJson
+                    << ",\"payload_preview\":" << payloadPreviewJson
+                    << ",\"matrix_a\":" << aOss.str()
+                    << ",\"matrix_y\":" << yOss.str()
+                    << ",\"operations\":" << opsOss.str()
+                    << "}";
                 if (eventCb) eventCb(oss.str());
                 std::cout << oss.str() << std::endl;
 
@@ -105,18 +223,59 @@ bool RlncGenDecoder::AddPacket(const std::vector<uint8_t> &coeffs, const uint8_t
                 // Eliminate leading term using existing pivot row i
                 uint8_t factor = row[i];
                 gf256_row_madd(row.data(), matrix[i].data(), K + blockSize, factor);
+                ops.push_back("Eliminate Col " + std::to_string(i + 1) + ": R_new ← R_new ⊕ (" +
+                              std::to_string((int)factor) + " ⊗ R" + std::to_string(i + 1) + ")");
             }
         }
     }
 
     // If all coefficients eliminated to zero, this packet is linearly dependent
     dependentCount++;
+    ops.push_back("Linearly dependent row reduced to all zero coefficients (rank remains " + std::to_string(rank) + ")");
+
+    std::ostringstream aOss, yOss, opsOss;
+    aOss << "["; yOss << "[";
+    for (int r = 0; r < K; r++) {
+        if (r > 0) { aOss << ","; yOss << ","; }
+        aOss << "["; yOss << "[";
+        for (int c = 0; c < K; c++) {
+            if (c > 0) aOss << ",";
+            aOss << (int)(hasRow[r] ? matrix[r][c] : 0);
+        }
+        aOss << "]";
+        for (size_t b = 0; b < 6 && b < blockSize; b++) {
+            if (b > 0) yOss << ",";
+            yOss << (int)(hasRow[r] ? matrix[r][K + b] : 0);
+        }
+        yOss << "]";
+    }
+    aOss << "]"; yOss << "]";
+
+    opsOss << "[";
+    for (size_t opIdx = 0; opIdx < ops.size(); opIdx++) {
+        if (opIdx > 0) opsOss << ",";
+        opsOss << "\"" << ops[opIdx] << "\"";
+    }
+    opsOss << "]";
+
     std::ostringstream oss;
     oss << "EVENT_JSON:{\"transfer_id\":\"" << transferId
         << "\",\"type\":\"decoder_matrix_update\",\"protocol\":\"rlnc\",\"time\":" << nowSec
-        << ",\"gen_id\":" << genId << ",\"rank\":" << rank
+        << ",\"seq_id\":" << seqNum
+        << ",\"packet_id\":" << seqNum
+        << ",\"gen_id\":" << genId
+        << ",\"rank\":" << rank
+        << ",\"rank_before\":" << rankBefore
+        << ",\"rank_after\":" << rank
         << ",\"required_rank\":" << (int)K
-        << ",\"innovative\":false}";
+        << ",\"innovative\":false"
+        << ",\"equation\":\"" << eqStr << "\""
+        << ",\"coeffs\":" << coeffsJson
+        << ",\"payload_preview\":" << payloadPreviewJson
+        << ",\"matrix_a\":" << aOss.str()
+        << ",\"matrix_y\":" << yOss.str()
+        << ",\"operations\":" << opsOss.str()
+        << "}";
     if (eventCb) eventCb(oss.str());
     std::cout << oss.str() << std::endl;
 
@@ -184,7 +343,7 @@ void RlncSenderApplication::Setup(ns3::Ptr<ns3::Socket> socket, ns3::Address pee
     // Partition source data into generations
     uint32_t bytesPerGen = (uint32_t)m_K * m_blockSize;
     if (m_data.empty()) {
-        m_totalGenerations = 1;
+        m_totalGenerations = 0;
     } else {
         m_totalGenerations = (m_data.size() + bytesPerGen - 1) / bytesPerGen;
     }
@@ -245,11 +404,12 @@ void RlncSenderApplication::SendNextPacket() {
         coeffs[b] = 1; // Unit vector
 
         const std::vector<uint8_t> &payload = m_genBlocks[m_currentGen][b];
+        uint32_t seqId = GetTotalSent();
 
         NetcodePacketHeader header;
         header.SetType(PKT_RLNC_SYSTEMATIC);
         header.SetTransferId(m_transferId);
-        header.SetSeqNum(GetTotalSent());
+        header.SetSeqNum(seqId);
         header.SetGenId(m_currentGen);
         header.SetK(m_K);
         header.SetPayloadSize(m_blockSize);
@@ -265,9 +425,16 @@ void RlncSenderApplication::SendNextPacket() {
         double nowSec = ns3::Simulator::Now().GetSeconds();
         std::ostringstream oss;
         oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
-            << "\",\"type\":\"packet_sent\",\"protocol\":\"rlnc\",\"time\":" << nowSec
-            << ",\"gen_id\":" << m_currentGen << ",\"packet_index\":" << (int)b
-            << ",\"coded\":false}";
+            << "\",\"type\":\"packet_transmitted\",\"protocol\":\"rlnc\",\"time\":" << nowSec
+            << ",\"seq_id\":" << seqId
+            << ",\"packet_id\":" << seqId
+            << ",\"gen_id\":" << m_currentGen
+            << ",\"packet_index\":" << (int)b
+            << ",\"coded\":false,\"pkt_type\":\"Systematic\""
+            << ",\"coeffs\":" << VectorToJsonArray(coeffs)
+            << ",\"payload_len\":" << m_blockSize
+            << ",\"data_preview\":" << PreviewToJsonArray(payload.data(), payload.size(), 6)
+            << ",\"source_node\":0,\"destination_node\":1}";
         if (m_eventCb) m_eventCb(oss.str());
         std::cout << oss.str() << std::endl;
 
@@ -286,10 +453,11 @@ void RlncSenderApplication::SendNextPacket() {
             gf256_row_madd(codedPayload.data(), m_genBlocks[m_currentGen][b].data(), m_blockSize, c);
         }
 
+        uint32_t seqId = GetTotalSent();
         NetcodePacketHeader header;
         header.SetType(PKT_RLNC_CODED);
         header.SetTransferId(m_transferId);
-        header.SetSeqNum(GetTotalSent());
+        header.SetSeqNum(seqId);
         header.SetGenId(m_currentGen);
         header.SetK(m_K);
         header.SetPayloadSize(m_blockSize);
@@ -305,9 +473,16 @@ void RlncSenderApplication::SendNextPacket() {
         double nowSec = ns3::Simulator::Now().GetSeconds();
         std::ostringstream oss;
         oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
-            << "\",\"type\":\"packet_sent\",\"protocol\":\"rlnc\",\"time\":" << nowSec
-            << ",\"gen_id\":" << m_currentGen << ",\"packet_index\":" << m_packetsSentInGen
-            << ",\"coded\":true}";
+            << "\",\"type\":\"packet_transmitted\",\"protocol\":\"rlnc\",\"time\":" << nowSec
+            << ",\"seq_id\":" << seqId
+            << ",\"packet_id\":" << seqId
+            << ",\"gen_id\":" << m_currentGen
+            << ",\"packet_index\":" << (m_packetsSentInGen - 1)
+            << ",\"coded\":true,\"pkt_type\":\"Mixed\""
+            << ",\"coeffs\":" << VectorToJsonArray(coeffs)
+            << ",\"payload_len\":" << m_blockSize
+            << ",\"data_preview\":" << PreviewToJsonArray(codedPayload.data(), codedPayload.size(), 6)
+            << ",\"source_node\":0,\"destination_node\":1}";
         if (m_eventCb) m_eventCb(oss.str());
         std::cout << oss.str() << std::endl;
     }
@@ -325,16 +500,9 @@ void RlncSenderApplication::SendNextPacket() {
 void RlncSenderApplication::OnGenTimeout(uint16_t genId) {
     if (m_finished || m_currentGen != genId) return;
 
-    // Timeout: send an additional coded packet to help receiver reach rank K
     double nowSec = ns3::Simulator::Now().GetSeconds();
-    std::ostringstream oss;
-    oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
-        << "\",\"type\":\"rlnc_redundancy_burst\",\"protocol\":\"rlnc\",\"time\":" << nowSec
-        << ",\"gen_id\":" << genId << "}";
-    if (m_eventCb) m_eventCb(oss.str());
-    std::cout << oss.str() << std::endl;
 
-    // Send another coded packet
+    // Send another coded repair packet
     std::vector<uint8_t> coeffs(m_K, 0);
     std::vector<uint8_t> codedPayload(m_blockSize, 0);
     for (uint8_t b = 0; b < m_K; b++) {
@@ -344,10 +512,11 @@ void RlncSenderApplication::OnGenTimeout(uint16_t genId) {
         gf256_row_madd(codedPayload.data(), m_genBlocks[m_currentGen][b].data(), m_blockSize, c);
     }
 
+    uint32_t seqId = GetTotalSent();
     NetcodePacketHeader header;
     header.SetType(PKT_RLNC_CODED);
     header.SetTransferId(m_transferId);
-    header.SetSeqNum(GetTotalSent());
+    header.SetSeqNum(seqId);
     header.SetGenId(m_currentGen);
     header.SetK(m_K);
     header.SetPayloadSize(m_blockSize);
@@ -358,6 +527,21 @@ void RlncSenderApplication::OnGenTimeout(uint16_t genId) {
 
     m_socket->SendTo(pkt, 0, m_peerAddress);
     m_repairBurstSent++;
+
+    std::ostringstream oss;
+    oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
+        << "\",\"type\":\"packet_transmitted\",\"protocol\":\"rlnc\",\"time\":" << nowSec
+        << ",\"seq_id\":" << seqId
+        << ",\"packet_id\":" << seqId
+        << ",\"gen_id\":" << genId
+        << ",\"packet_index\":" << (m_packetsSentInGen + m_repairBurstSent - 1)
+        << ",\"coded\":true,\"pkt_type\":\"Mixed (Retransmit)\",\"is_repair\":true"
+        << ",\"coeffs\":" << VectorToJsonArray(coeffs)
+        << ",\"payload_len\":" << m_blockSize
+        << ",\"data_preview\":" << PreviewToJsonArray(codedPayload.data(), codedPayload.size(), 6)
+        << ",\"source_node\":0,\"destination_node\":1}";
+    if (m_eventCb) m_eventCb(oss.str());
+    std::cout << oss.str() << std::endl;
 
     // Re-schedule timeout
     m_genTimeoutEvent = ns3::Simulator::Schedule(ns3::MilliSeconds(250), &RlncSenderApplication::OnGenTimeout, this, genId);
@@ -484,7 +668,7 @@ void RlncReceiverApplication::Setup(ns3::Ptr<ns3::Socket> socket, uint32_t total
 
     uint32_t bytesPerGen = (uint32_t)m_K * m_blockSize;
     if (m_totalFileSize == 0) {
-        m_totalGenerations = 1;
+        m_totalGenerations = 0;
     } else {
         m_totalGenerations = (m_totalFileSize + bytesPerGen - 1) / bytesPerGen;
     }
@@ -529,6 +713,7 @@ void RlncReceiverApplication::HandleRead(ns3::Ptr<ns3::Socket> socket) {
         if (header.GetType() == PKT_RLNC_SYSTEMATIC) {
             m_systematicReceived++;
             uint16_t genId = header.GetGenId();
+            uint32_t seqId = header.GetSeqNum();
 
             if (m_decoders.find(genId) == m_decoders.end()) {
                 m_decoders[genId] = RlncGenDecoder(m_K, m_blockSize);
@@ -547,14 +732,18 @@ void RlncReceiverApplication::HandleRead(ns3::Ptr<ns3::Socket> socket) {
             std::ostringstream rxOss;
             rxOss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
                   << "\",\"type\":\"packet_received\",\"protocol\":\"rlnc\",\"time\":" << nowSec
-                  << ",\"seq_id\":" << header.GetSeqNum()
+                  << ",\"seq_id\":" << seqId
+                  << ",\"packet_id\":" << seqId
                   << ",\"gen_id\":" << genId
                   << ",\"payload_len\":" << m_blockSize
-                  << ",\"coded\":false}";
+                  << ",\"coded\":false,\"pkt_type\":\"Systematic\""
+                  << ",\"coeffs\":" << VectorToJsonArray(header.GetCoefficients())
+                  << ",\"data_preview\":" << PreviewToJsonArray(payload.data(), payload.size(), 6)
+                  << ",\"source_node\":0,\"destination_node\":1}";
             if (m_eventCb) m_eventCb(rxOss.str());
             std::cout << rxOss.str() << std::endl;
 
-            bool inno = dec.AddPacket(header.GetCoefficients(), payload.data(), genId, m_eventCb, m_transferId);
+            bool inno = dec.AddPacket(header.GetCoefficients(), payload.data(), genId, m_eventCb, m_transferId, seqId);
             if (inno) {
                 m_totalInnovative++;
             } else {
@@ -571,6 +760,7 @@ void RlncReceiverApplication::HandleRead(ns3::Ptr<ns3::Socket> socket) {
         } else if (header.GetType() == PKT_RLNC_CODED) {
             m_codedReceived++;
             uint16_t genId = header.GetGenId();
+            uint32_t seqId = header.GetSeqNum();
 
             if (m_decoders.find(genId) == m_decoders.end()) {
                 m_decoders[genId] = RlncGenDecoder(m_K, m_blockSize);
@@ -589,14 +779,18 @@ void RlncReceiverApplication::HandleRead(ns3::Ptr<ns3::Socket> socket) {
             std::ostringstream rxOss;
             rxOss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
                   << "\",\"type\":\"packet_received\",\"protocol\":\"rlnc\",\"time\":" << nowSec
-                  << ",\"seq_id\":" << header.GetSeqNum()
+                  << ",\"seq_id\":" << seqId
+                  << ",\"packet_id\":" << seqId
                   << ",\"gen_id\":" << genId
                   << ",\"payload_len\":" << m_blockSize
-                  << ",\"coded\":true}";
+                  << ",\"coded\":true,\"pkt_type\":\"Mixed\""
+                  << ",\"coeffs\":" << VectorToJsonArray(header.GetCoefficients())
+                  << ",\"data_preview\":" << PreviewToJsonArray(payload.data(), payload.size(), 6)
+                  << ",\"source_node\":0,\"destination_node\":1}";
             if (m_eventCb) m_eventCb(rxOss.str());
             std::cout << rxOss.str() << std::endl;
 
-            bool inno = dec.AddPacket(header.GetCoefficients(), payload.data(), genId, m_eventCb, m_transferId);
+            bool inno = dec.AddPacket(header.GetCoefficients(), payload.data(), genId, m_eventCb, m_transferId, seqId);
             if (inno) {
                 m_totalInnovative++;
             } else {
@@ -684,6 +878,17 @@ void RlncReceiverApplication::CheckOverallCompletion(ns3::Address from) {
 
     double nowSec = ns3::Simulator::Now().GetSeconds();
     std::string hash = sha256_bytes(m_reconstructedData.data(), m_reconstructedData.size());
+
+    std::ostringstream reconOss;
+    reconOss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
+             << "\",\"type\":\"reconstruction_progress\",\"protocol\":\"rlnc\",\"time\":" << nowSec
+             << ",\"recovered_blocks\":" << (m_totalGenerations * m_K)
+             << ",\"total_blocks\":" << (m_totalGenerations * m_K)
+             << ",\"pct\":100"
+             << ",\"bytes_reconstructed\":" << m_reconstructedData.size()
+             << "}";
+    if (m_eventCb) m_eventCb(reconOss.str());
+    std::cout << reconOss.str() << std::endl;
 
     std::ostringstream oss;
     oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId

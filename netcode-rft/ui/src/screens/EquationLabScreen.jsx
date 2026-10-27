@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTransfer } from '../context/TransferContext';
 import {
   CheckCircle2,
@@ -14,32 +14,83 @@ import {
   Cpu,
   Info,
   Copy,
+  Sliders,
+  Check,
+  XCircle,
 } from 'lucide-react';
 
 export default function EquationLabScreen() {
   const navigate = useNavigate();
-  const { transfer, verification } = useTransfer();
+  const [searchParams] = useSearchParams();
+  const { transfer: contextTransfer, verification, events = [] } = useTransfer();
+
+  const urlTransferId = searchParams.get('transferId');
+  const urlPacketId = searchParams.get('packetId');
+  const urlGen = searchParams.get('generation') ?? searchParams.get('gen');
+
+  const [activeTransfer, setActiveTransfer] = useState(null);
+  const effectiveTransferId = urlTransferId || contextTransfer?.id;
 
   const [calcData, setCalcData] = useState(null);
-  const [selectedGen, setSelectedGen] = useState(0);
+  const [selectedGen, setSelectedGen] = useState(urlGen ? parseInt(urlGen, 10) : 0);
+  const [selectedStepIndex, setSelectedStepIndex] = useState(null);
+  const [selectedDroppedPacket, setSelectedDroppedPacket] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [displayFormat, setDisplayFormat] = useState('dec'); // 'dec' | 'hex'
+
+  // Sync external transfer record if opened via URL transferId
+  useEffect(() => {
+    if (urlTransferId && (!contextTransfer || contextTransfer.id !== urlTransferId)) {
+      fetch(`/api/transfers/${urlTransferId}`)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data) setActiveTransfer(data);
+        })
+        .catch(console.error);
+    }
+  }, [urlTransferId, contextTransfer?.id]);
+
+  const transfer = activeTransfer || contextTransfer;
 
   useEffect(() => {
-    setSelectedGen(0);
-  }, [transfer?.id]);
+    if (urlGen !== null && urlGen !== undefined) {
+      const g = parseInt(urlGen, 10);
+      if (!isNaN(g)) setSelectedGen(g);
+    } else {
+      setSelectedGen(0);
+    }
+  }, [effectiveTransferId, urlGen]);
 
+  // Live dynamic polling and Socket sync: updates whenever new events arrive from NS-3 engine
   useEffect(() => {
-    if (transfer?.id) {
+    if (effectiveTransferId) {
       setLoading(true);
-      fetch(`/api/calculations/transfer/${transfer.id}?generation=${selectedGen}`)
+      fetch(`/api/calculations/transfer/${effectiveTransferId}?generation=${selectedGen}`)
         .then((res) => res.json())
-        .then((data) => setCalcData(data))
+        .then((data) => {
+          setCalcData(data);
+          // If a packetId was requested via URL, correlate to its exact step or drop event
+          if (urlPacketId !== null && urlPacketId !== undefined) {
+            const pIdNum = parseInt(urlPacketId, 10);
+            const drop = (data.droppedPackets || []).find((d) => d.seqId === pIdNum);
+            if (drop) {
+              setSelectedDroppedPacket(drop);
+              setSelectedStepIndex(null);
+            } else {
+              const stepIdx = (data.decoderHistory || []).findIndex((s) => s.seqId === pIdNum);
+              if (stepIdx !== -1) {
+                setSelectedStepIndex(stepIdx);
+                setSelectedDroppedPacket(null);
+              }
+            }
+          }
+        })
         .catch(console.error)
         .finally(() => setLoading(false));
     } else {
       setCalcData(null);
     }
-  }, [transfer?.id, selectedGen]);
+  }, [effectiveTransferId, selectedGen, events?.length, urlPacketId]);
 
   const isRudp = transfer?.protocol === 'rudp';
   const isEmptyFile = transfer?.fileSize === 0;
@@ -58,6 +109,50 @@ export default function EquationLabScreen() {
   const gaussJordan = calcData?.gaussJordan || null;
   const decodedPackets = calcData?.decodedPackets || [];
 
+  const decoderHistory = calcData?.decoderHistory || [];
+  const droppedPackets = calcData?.droppedPackets || [];
+  const reverseDroppedAcks = calcData?.reverseDroppedAcks || [];
+  const gf256Info = calcData?.gf256Info || {
+    field: 'GF(256)',
+    irreduciblePolynomial: '0x11D',
+    polynomialDescription: 'P(x) = x^8 + x^4 + x^3 + x^2 + 1',
+    generatorElement: '0x02',
+    addition: 'Bitwise XOR (⊕)',
+    multiplication: 'Log/Exp table lookup with reduction modulo 0x11D',
+  };
+
+  const isStepSelected = selectedStepIndex !== null && decoderHistory[selectedStepIndex];
+  const activeStep = isStepSelected
+    ? decoderHistory[selectedStepIndex]
+    : (decoderHistory.length > 0 ? decoderHistory[decoderHistory.length - 1] : null);
+
+  const activeReceivedPackets = isStepSelected
+    ? receivedPackets.filter(p => (activeStep.time != null && p.time != null) ? p.time <= activeStep.time : p.seqId <= activeStep.seqId)
+    : receivedPackets;
+
+  const activeMatrixA = isStepSelected && activeStep.matrixA
+    ? activeStep.matrixA
+    : matrixA;
+
+  const activeMatrixC = isStepSelected && activeStep.matrixY
+    ? activeStep.matrixY.map(r => r.slice(0, 3))
+    : matrixC;
+
+  const activeRank = isStepSelected && activeStep.rankAfter !== undefined
+    ? activeStep.rankAfter
+    : rank;
+
+  const activeGaussSteps = isStepSelected && activeStep.operations && activeStep.operations.length > 0
+    ? activeStep.operations.map(op => ({
+        op: op.op,
+        desc: op.desc || `${op.op.toUpperCase()} on Row ${op.row || op.target_row || 1}`,
+        row: op.row,
+        targetRow: op.target_row,
+        pivotRow: op.pivot_row,
+        factor: op.factor,
+      }))
+    : (gaussJordan?.steps || []);
+
   // Reliable UDP-specific derived values
   const rudpData = calcData?.rudpData || null;
   const sourceBlocks = calcData?.sourceBlocks || [];
@@ -67,8 +162,8 @@ export default function EquationLabScreen() {
   const reconHash = verification?.reconSha || '';
   const hashesMatch = Boolean(verification?.verified && origHash && reconHash && origHash === reconHash);
 
-  // Helper to format mathematical bracket matrix
-  const renderBracketMatrix = (mat, borderCol = '#38bdf8') => {
+  // Helper to format mathematical bracket matrix with Decimal/Hex display support
+  const renderBracketMatrix = (mat, borderCol = '#38bdf8', isHex = displayFormat === 'hex') => {
     if (!mat || mat.length === 0) return null;
     return (
       <div style={{
@@ -90,7 +185,7 @@ export default function EquationLabScreen() {
               <tr key={rIdx} style={{ height: '24px' }}>
                 {row.map((val, cIdx) => (
                   <td key={cIdx} style={{ padding: '2px 8px', color: '#e2e8f0', whiteSpace: 'nowrap' }}>
-                    {val}
+                    {isHex ? `0x${Number(val).toString(16).padStart(2, '0').toUpperCase()}` : val}
                   </td>
                 ))}
               </tr>
@@ -140,7 +235,7 @@ export default function EquationLabScreen() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <button
-            onClick={() => navigate('/')}
+            onClick={() => navigate(transfer?.id ? `/?transferId=${transfer.id}` : '/')}
             style={{
               background: '#1e293b',
               color: '#cbd5e1',
@@ -162,6 +257,38 @@ export default function EquationLabScreen() {
             }}
           >
             Transfer & Simulation
+          </button>
+          <button
+            onClick={() => navigate(transfer?.id ? `/visualizer?transferId=${transfer.id}` : '/visualizer')}
+            style={{
+              background: '#1e293b',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              padding: '7px 18px',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+            }}
+          >
+            Packet Visualizer
+          </button>
+          <button
+            onClick={() => navigate(transfer?.id ? `/netanim?transferId=${transfer.id}` : '/netanim')}
+            style={{
+              background: '#1e293b',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              padding: '7px 18px',
+              borderRadius: '6px',
+              fontSize: '0.82rem',
+              fontWeight: 600,
+              cursor: 'pointer',
+              transition: 'all 0.2s ease',
+            }}
+          >
+            NetAnim
           </button>
           <button
             style={{
@@ -601,322 +728,586 @@ export default function EquationLabScreen() {
 
         {/* CASE D: RLNC GALOIS FIELD GF(256) EQUATION LAB */}
         {transfer && !isEmptyFile && !isRudp && (
-          <div style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))',
-            gap: '16px',
-            alignItems: 'start',
-          }}>
-            {/* CARD 1: 1. Received Coded Packets */}
-            <div className="glass-panel" style={{ padding: '16px', background: '#0d1b2e', borderRadius: '10px', border: '1px solid #1e3a5f' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <span style={{
-                  width: '20px',
-                  height: '20px',
-                  borderRadius: '50%',
-                  background: '#2563eb',
-                  color: '#fff',
-                  fontSize: '0.72rem',
-                  fontWeight: 800,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}>
-                  1
-                </span>
-                <h3 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff', margin: 0 }}>
-                  Received Coded Packets
-                </h3>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-                <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
-                  Generation {selectedGen + 1} of {totalGenerations} (k = {K})
-                </div>
-                {totalGenerations > 1 && (
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {Array.from({ length: totalGenerations }).map((_, gIdx) => (
-                      <button
-                        key={gIdx}
-                        onClick={() => setSelectedGen(gIdx)}
-                        style={{
-                          padding: '2px 8px',
-                          fontSize: '0.7rem',
-                          fontWeight: 600,
-                          borderRadius: '4px',
-                          border: selectedGen === gIdx ? '1px solid #38bdf8' : '1px solid #334155',
-                          background: selectedGen === gIdx ? 'rgba(56, 189, 248, 0.2)' : '#1e293b',
-                          color: selectedGen === gIdx ? '#38bdf8' : '#94a3b8',
-                          cursor: 'pointer',
-                        }}
-                      >
-                        Gen {gIdx + 1}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {receivedPackets.length === 0 ? (
-                <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748b', fontSize: '0.78rem', background: 'rgba(15, 23, 42, 0.4)', borderRadius: '6px' }}>
-                  Waiting for coded packets to arrive over UDP socket...
-                </div>
-              ) : (
-                <>
-                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem', marginBottom: '16px' }}>
-                    <thead>
-                      <tr style={{ borderBottom: '1px solid #1e3a5f', color: '#94a3b8', textAlign: 'left' }}>
-                        <th style={{ padding: '6px 4px' }}>Packet ID</th>
-                        <th style={{ padding: '6px 4px' }}>Coding Coefficients</th>
-                        <th style={{ padding: '6px 4px' }}>Data (bytes)</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {receivedPackets.map((p, idx) => (
-                        <tr key={idx} style={{ borderBottom: '1px solid rgba(30, 58, 95, 0.4)' }}>
-                          <td style={{ padding: '6px 4px', color: '#38bdf8', fontWeight: 700 }}>{p.id}</td>
-                          <td style={{ padding: '6px 4px', color: '#fff', fontFamily: 'var(--font-mono)' }}>[{p.coeffs.join(', ')}]</td>
-                          <td style={{ padding: '6px 4px', color: '#94a3b8', fontFamily: 'var(--font-mono)' }}>
-                            [{p.dataPreview.slice(0, 3).join(', ')}, ...]
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-
-                  <div style={{ borderTop: '1px solid #1e3a5f', paddingTop: '10px' }}>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px', textAlign: 'center', marginBottom: '8px' }}>
-                      <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
-                        <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Total Received</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>{totalReceivedPackets}</div>
-                      </div>
-                      <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
-                        <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Independent</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#10b981', fontFamily: 'var(--font-mono)' }}>{independentEquations}</div>
-                      </div>
-                      <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
-                        <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Dependent</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 800, color: dependentEquations > 0 ? '#fbbf24' : '#64748b', fontFamily: 'var(--font-mono)' }}>{dependentEquations}</div>
-                      </div>
-                      <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
-                        <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Gen Size (K)</div>
-                        <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#fff', fontFamily: 'var(--font-mono)' }}>{K}</div>
-                      </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {/* INTERACTIVE TIMELINE SCRUBBER & DYNAMIC EQUATION INSPECTOR */}
+            <div className="glass-panel" style={{
+              padding: '16px 20px',
+              background: '#0a1932',
+              borderRadius: '10px',
+              border: '1px solid #1e3a5f',
+              boxShadow: '0 4px 20px rgba(0, 0, 0, 0.3)',
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <Sliders size={20} color="#38bdf8" />
+                  <div>
+                    <h3 style={{ fontSize: '1rem', fontWeight: 800, margin: 0, color: '#fff' }}>
+                      Simulation Timeline & Mathematical Equation Stepper
+                    </h3>
+                    <div style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
+                      GF(256) Primitive Polynomial: <code style={{ color: '#38bdf8' }}>{gf256Info.irreduciblePolynomial}</code> ({gf256Info.polynomialDescription}) | Generator: <code style={{ color: '#38bdf8' }}>{gf256Info.generatorElement}</code>
                     </div>
-                    {rank >= K ? (
-                      <div style={{ fontSize: '0.75rem', color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <CheckCircle2 size={14} color="#10b981" />
-                        <span>Sufficient for decoding (Rank {rank} = K)</span>
-                      </div>
-                    ) : (
-                      <div style={{ fontSize: '0.75rem', color: '#fbbf24', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <AlertCircle size={14} color="#fbbf24" />
-                        <span>Waiting for more independent packets (Rank {rank} &lt; {K})</span>
-                      </div>
-                    )}
                   </div>
-                </>
-              )}
-            </div>
-
-            {/* CARD 2: 2. Coefficient Matrix (A) & Coded Data Matrix (C) */}
-            <div className="glass-panel" style={{ padding: '16px', background: '#0d1b2e', borderRadius: '10px', border: '1px solid #1e3a5f' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <span style={{
-                  width: '20px',
-                  height: '20px',
-                  borderRadius: '50%',
-                  background: '#2563eb',
-                  color: '#fff',
-                  fontSize: '0.72rem',
-                  fontWeight: 800,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}>
-                  2
-                </span>
-                <h3 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff', margin: 0 }}>
-                  Coefficient Matrix (A)
-                </h3>
-              </div>
-              <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: '8px' }}>
-                Built directly from all {matrixA.length} received packets ({matrixA.length} × {K})
-              </div>
-
-              {matrixA.length === 0 ? (
-                <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748b', fontSize: '0.78rem', background: 'rgba(15, 23, 42, 0.4)', borderRadius: '6px' }}>
-                  Coefficient matrix A will assemble as packets are received over UDP.
                 </div>
-              ) : (
-                <>
-                  <div style={{ textAlign: 'center', marginBottom: '10px' }}>
-                    {renderBracketMatrix(matrixA, '#38bdf8')}
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <div style={{ display: 'flex', background: '#1e293b', borderRadius: '5px', border: '1px solid #334155', padding: '2px' }}>
+                    <button
+                      onClick={() => setDisplayFormat('dec')}
+                      style={{
+                        background: displayFormat === 'dec' ? '#2563eb' : 'transparent',
+                        color: displayFormat === 'dec' ? '#fff' : '#94a3b8',
+                        border: 'none',
+                        padding: '3px 8px',
+                        borderRadius: '4px',
+                        fontSize: '0.7rem',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      DEC (0–255)
+                    </button>
+                    <button
+                      onClick={() => setDisplayFormat('hex')}
+                      style={{
+                        background: displayFormat === 'hex' ? '#2563eb' : 'transparent',
+                        color: displayFormat === 'hex' ? '#fff' : '#94a3b8',
+                        border: 'none',
+                        padding: '3px 8px',
+                        borderRadius: '4px',
+                        fontSize: '0.7rem',
+                        fontWeight: 700,
+                        cursor: 'pointer',
+                      }}
+                    >
+                      HEX (0x00–0xFF)
+                    </button>
                   </div>
 
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', fontSize: '0.78rem' }}>
-                    <span style={{ color: '#fff', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
-                      Rank = {rank} <span style={{ color: '#94a3b8', fontWeight: 400 }}>({independentEquations} indep, {dependentEquations} dep, k = {K})</span>
-                    </span>
-                    {isFullRank ? (
-                      <span style={{ color: '#10b981', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <CheckCircle2 size={14} color="#10b981" /> Full Rank
-                      </span>
-                    ) : (
-                      <span style={{ color: '#fbbf24', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <AlertCircle size={14} color="#fbbf24" /> Incomplete Rank
-                      </span>
-                    )}
-                  </div>
+                  <button
+                    onClick={() => { setSelectedStepIndex(null); setSelectedDroppedPacket(null); }}
+                    style={{
+                      background: selectedStepIndex === null && !selectedDroppedPacket ? '#2563eb' : '#1e293b',
+                      color: '#fff',
+                      border: '1px solid #334155',
+                      padding: '5px 12px',
+                      borderRadius: '5px',
+                      fontSize: '0.74rem',
+                      fontWeight: 700,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    All Packets (Final State)
+                  </button>
+                </div>
+              </div>
 
-                  <div style={{ borderTop: '1px solid #1e3a5f', paddingTop: '10px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                      <span style={{
-                        width: '18px',
-                        height: '18px',
-                        borderRadius: '50%',
-                        background: '#2563eb',
-                        color: '#fff',
-                        fontSize: '0.68rem',
-                        fontWeight: 800,
+              {/* TIMELINE SLIDER */}
+              {decoderHistory.length > 1 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px', marginBottom: '14px', background: 'rgba(15, 23, 42, 0.6)', padding: '8px 14px', borderRadius: '6px' }}>
+                  <span style={{ fontSize: '0.74rem', color: '#94a3b8', minWidth: '90px' }}>
+                    {isStepSelected ? `Step ${selectedStepIndex + 1} of ${decoderHistory.length}` : `All ${decoderHistory.length} Steps`}
+                  </span>
+                  <input
+                    type="range"
+                    min="0"
+                    max={decoderHistory.length - 1}
+                    value={selectedStepIndex !== null ? selectedStepIndex : decoderHistory.length - 1}
+                    onChange={(e) => {
+                      setSelectedStepIndex(parseInt(e.target.value, 10));
+                      setSelectedDroppedPacket(null);
+                    }}
+                    style={{ flex: 1, accentColor: '#38bdf8', cursor: 'pointer' }}
+                  />
+                  <span style={{ fontSize: '0.74rem', color: '#38bdf8', fontFamily: 'var(--font-mono)', minWidth: '90px', textAlign: 'right' }}>
+                    {activeStep?.time != null ? `+${(activeStep.time * 1000).toFixed(1)}ms` : 'Final'}
+                  </span>
+                </div>
+              )}
+
+              {/* PACKET STEP PILLS (Innovative, Dependent, Dropped) */}
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'center', marginBottom: '14px' }}>
+                <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600 }}>Packet Timeline:</span>
+                {decoderHistory.map((step, idx) => {
+                  const isSelected = selectedStepIndex === idx;
+                  const isInnovative = step.innovative;
+                  return (
+                    <button
+                      key={`step-${idx}`}
+                      onClick={() => { setSelectedStepIndex(idx); setSelectedDroppedPacket(null); }}
+                      style={{
+                        padding: '4px 10px',
+                        borderRadius: '5px',
+                        fontSize: '0.72rem',
+                        fontFamily: 'var(--font-mono)',
+                        cursor: 'pointer',
+                        border: isSelected
+                          ? '2px solid #38bdf8'
+                          : `1px solid ${isInnovative ? 'rgba(16, 185, 129, 0.4)' : 'rgba(245, 158, 11, 0.4)'}`,
+                        background: isSelected
+                          ? 'rgba(56, 189, 248, 0.25)'
+                          : (isInnovative ? 'rgba(16, 185, 129, 0.1)' : 'rgba(245, 158, 11, 0.1)'),
+                        color: isInnovative ? '#34d399' : '#fbbf24',
+                        fontWeight: 700,
                         display: 'flex',
                         alignItems: 'center',
-                        justifyContent: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <span>PKT #{step.seqId + 1}</span>
+                      <span style={{
+                        fontSize: '0.62rem',
+                        padding: '1px 4px',
+                        borderRadius: '3px',
+                        background: isInnovative ? 'rgba(16, 185, 129, 0.3)' : 'rgba(245, 158, 11, 0.3)',
+                        color: isInnovative ? '#10b981' : '#f59e0b',
                       }}>
-                        2
+                        {isInnovative ? `Rank ${step.rankAfter}` : 'Dep'}
                       </span>
-                      <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#fff' }}>
-                        Coded Data Matrix (C) ({matrixC.length} × {matrixC[0]?.length || 3})
-                      </div>
-                    </div>
-                    <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginBottom: '6px' }}>
-                      (Each row is a received packet payload preview)
-                    </div>
-                    <div style={{ textAlign: 'center' }}>
-                      {renderBracketMatrix(matrixC, '#a855f7')}
-                    </div>
+                    </button>
+                  );
+                })}
+
+                {/* DROPPED PACKETS PILLS */}
+                {droppedPackets.map((dp, dIdx) => {
+                  const isSelected = selectedDroppedPacket?.seqId === dp.seqId;
+                  return (
+                    <button
+                      key={`drop-${dIdx}`}
+                      onClick={() => { setSelectedDroppedPacket(dp); setSelectedStepIndex(null); }}
+                      style={{
+                        padding: '4px 10px',
+                        borderRadius: '5px',
+                        fontSize: '0.72rem',
+                        fontFamily: 'var(--font-mono)',
+                        cursor: 'pointer',
+                        border: isSelected ? '2px solid #ef4444' : '1px solid rgba(239, 68, 68, 0.4)',
+                        background: isSelected ? 'rgba(239, 68, 68, 0.3)' : 'rgba(239, 68, 68, 0.12)',
+                        color: '#f87171',
+                        fontWeight: 700,
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                      }}
+                    >
+                      <XCircle size={12} color="#ef4444" />
+                      <span>PKT #{dp.seqId + 1} (DROPPED)</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* DYNAMIC EQUATION INSPECTION BOX */}
+              {selectedDroppedPacket ? (
+                <div style={{
+                  padding: '12px 16px',
+                  borderRadius: '6px',
+                  background: 'rgba(239, 68, 68, 0.12)',
+                  border: '1px solid rgba(239, 68, 68, 0.4)',
+                  fontSize: '0.8rem',
+                  color: '#fca5a5',
+                  lineHeight: '1.5',
+                }}>
+                  <div style={{ fontWeight: 800, color: '#ef4444', display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                    <XCircle size={16} color="#ef4444" />
+                    <span>Packet #{selectedDroppedPacket.seqId + 1} Dropped by Physical Impairment Channel</span>
                   </div>
-                </>
+                  <div>
+                    This packet encountered the NS-3 Point-to-Point <code>RateErrorModel</code> error sink and was dropped at <strong>+{Number(selectedDroppedPacket.time || 0).toFixed(2)}ms</strong> (Reason: <em>{selectedDroppedPacket.reason}</em>).
+                  </div>
+                  <div style={{ marginTop: '4px', fontSize: '0.74rem', color: '#f87171' }}>
+                    Because it was dropped in transit, it never reached Node 1's UDP receive socket. In accordance with physical network modeling, dropped packets are <strong>strictly excluded</strong> from the receiver's RLNC equation set and matrix.
+                  </div>
+                </div>
+              ) : activeStep ? (
+                <div style={{
+                  padding: '12px 16px',
+                  borderRadius: '6px',
+                  background: 'rgba(56, 189, 248, 0.08)',
+                  border: '1px solid rgba(56, 189, 248, 0.3)',
+                  fontSize: '0.82rem',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                    <span style={{ fontWeight: 800, color: '#38bdf8' }}>
+                      Active RLNC Linear Equation (PKT #{activeStep.seqId + 1}):
+                    </span>
+                    <span style={{
+                      fontSize: '0.7rem',
+                      padding: '2px 8px',
+                      borderRadius: '4px',
+                      fontWeight: 700,
+                      background: activeStep.innovative ? 'rgba(16, 185, 129, 0.2)' : 'rgba(245, 158, 11, 0.2)',
+                      color: activeStep.innovative ? '#34d399' : '#fbbf24',
+                    }}>
+                      {activeStep.innovative
+                        ? `INNOVATIVE: Matrix Rank Increased ${activeStep.rankBefore} → ${activeStep.rankAfter}`
+                        : `DEPENDENT: Linearly Dependent (Rank unchanged at ${activeStep.rankAfter})`}
+                    </span>
+                  </div>
+                  <div style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: '0.92rem',
+                    fontWeight: 700,
+                    color: '#fff',
+                    background: 'rgba(15, 23, 42, 0.6)',
+                    padding: '8px 12px',
+                    borderRadius: '4px',
+                    marginBottom: '6px',
+                  }}>
+                    y_{activeStep.seqId + 1} = {activeStep.equation || activeStep.coeffs.map((c, i) => `${c}·x_${i + 1}`).join(' ⊕ ')}
+                  </div>
+                  <div style={{ fontSize: '0.72rem', color: '#94a3b8' }}>
+                    Coding Vector: <code style={{ color: '#e2e8f0' }}>[{activeStep.coeffs.join(', ')}]</code> | Addition is XOR (⊕) in GF(256) | Payload Preview: <code style={{ color: '#a855f7' }}>[{(activeStep.data_preview || activeStep.dataPreview || []).slice(0, 3).join(', ')}]</code>
+                  </div>
+                </div>
+              ) : null}
+
+              {/* REVERSE LINK ACK DROPS NOTICE */}
+              {reverseDroppedAcks.length > 0 && (
+                <div style={{
+                  marginTop: '10px',
+                  padding: '8px 12px',
+                  borderRadius: '6px',
+                  background: 'rgba(245, 158, 11, 0.08)',
+                  border: '1px solid rgba(245, 158, 11, 0.25)',
+                  fontSize: '0.76rem',
+                  color: '#fbbf24',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '8px',
+                }}>
+                  <Info size={15} color="#fbbf24" style={{ flexShrink: 0 }} />
+                  <div>
+                    <strong>Reverse Link Notice:</strong> {reverseDroppedAcks.length} reverse ACK/feedback packet(s) were dropped on the return link (Node 1 → Node 0). Forward data equations arrived intact and were decoded at the receiver.
+                  </div>
+                </div>
               )}
             </div>
 
-            {/* CARD 3: 3. Gaussian Elimination (GF(256)) */}
-            <div className="glass-panel" style={{ padding: '16px', background: '#0d1b2e', borderRadius: '10px', border: '1px solid #1e3a5f' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                <span style={{
-                  width: '20px',
-                  height: '20px',
-                  borderRadius: '50%',
-                  background: '#2563eb',
-                  color: '#fff',
-                  fontSize: '0.72rem',
-                  fontWeight: 800,
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}>
-                  3
-                </span>
-                <h3 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff', margin: 0 }}>
-                  Gaussian Elimination (GF(256))
-                </h3>
-              </div>
-              <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: '8px' }}>
-                Row operations applied simultaneously to augmented matrix [A | C]
-              </div>
-
-              {!gaussJordan || matrixA.length === 0 ? (
-                <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748b', fontSize: '0.78rem', background: 'rgba(15, 23, 42, 0.4)', borderRadius: '6px' }}>
-                  Gauss-Jordan elimination operations will trace row-by-row once packets arrive.
-                </div>
-              ) : (
-                <>
-                  <div style={{ fontSize: '0.68rem', color: '#94a3b8', marginBottom: '4px', fontWeight: 600 }}>
-                    Initial Augmented Matrix [A | C] ({matrixA.length} × {K + (matrixC[0]?.length || 3)})
-                  </div>
-                  <div style={{
-                    display: 'inline-flex',
+            {/* 4 CORE CARDS GRID */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(290px, 1fr))',
+              gap: '16px',
+              alignItems: 'start',
+            }}>
+              {/* CARD 1: 1. Received Coded Packets */}
+              <div className="glass-panel" style={{ padding: '16px', background: '#0d1b2e', borderRadius: '10px', border: '1px solid #1e3a5f' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{
+                    width: '20px',
+                    height: '20px',
+                    borderRadius: '50%',
+                    background: '#2563eb',
+                    color: '#fff',
+                    fontSize: '0.72rem',
+                    fontWeight: 800,
+                    display: 'flex',
                     alignItems: 'center',
-                    borderLeft: '2.5px solid #38bdf8',
-                    borderRight: '2.5px solid #38bdf8',
-                    borderRadius: '4px',
-                    padding: '3px 8px',
-                    background: 'rgba(15, 23, 42, 0.6)',
-                    marginBottom: '8px',
-                    width: '100%',
                     justifyContent: 'center',
                   }}>
-                    <table style={{ borderCollapse: 'collapse', fontFamily: 'var(--font-mono)', fontSize: '0.72rem', textAlign: 'center' }}>
+                    1
+                  </span>
+                  <h3 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff', margin: 0 }}>
+                    Received Coded Packets
+                  </h3>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                  <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                    Generation {selectedGen + 1} of {totalGenerations} (k = {K})
+                  </div>
+                  {totalGenerations > 1 && (
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {Array.from({ length: totalGenerations }).map((_, gIdx) => (
+                        <button
+                          key={gIdx}
+                          onClick={() => setSelectedGen(gIdx)}
+                          style={{
+                            padding: '2px 8px',
+                            fontSize: '0.7rem',
+                            fontWeight: 600,
+                            borderRadius: '4px',
+                            border: selectedGen === gIdx ? '1px solid #38bdf8' : '1px solid #334155',
+                            background: selectedGen === gIdx ? 'rgba(56, 189, 248, 0.2)' : '#1e293b',
+                            color: selectedGen === gIdx ? '#38bdf8' : '#94a3b8',
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Gen {gIdx + 1}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {activeReceivedPackets.length === 0 ? (
+                  <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748b', fontSize: '0.78rem', background: 'rgba(15, 23, 42, 0.4)', borderRadius: '6px' }}>
+                    Waiting for coded packets to arrive over UDP socket...
+                  </div>
+                ) : (
+                  <>
+                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.75rem', marginBottom: '16px' }}>
+                      <thead>
+                        <tr style={{ borderBottom: '1px solid #1e3a5f', color: '#94a3b8', textAlign: 'left' }}>
+                          <th style={{ padding: '6px 4px' }}>Packet ID</th>
+                          <th style={{ padding: '6px 4px' }}>Coding Coefficients</th>
+                          <th style={{ padding: '6px 4px' }}>Data (bytes)</th>
+                        </tr>
+                      </thead>
                       <tbody>
-                        {matrixA.map((row, rIdx) => (
-                          <tr key={rIdx}>
-                            {row.map((val, cIdx) => (
-                              <td key={cIdx} style={{ padding: '2px 5px', color: '#38bdf8' }}>{val}</td>
-                            ))}
-                            <td style={{ padding: '2px 4px', color: '#64748b' }}>|</td>
-                            {(matrixC[rIdx] || [0, 0, 0]).map((val, cIdx) => (
-                              <td key={cIdx} style={{ padding: '2px 5px', color: '#e2e8f0' }}>{val}</td>
-                            ))}
+                        {activeReceivedPackets.map((p, idx) => (
+                          <tr key={idx} style={{ borderBottom: '1px solid rgba(30, 58, 95, 0.4)' }}>
+                            <td style={{ padding: '6px 4px', color: '#38bdf8', fontWeight: 700 }}>{p.id}</td>
+                            <td style={{ padding: '6px 4px', color: '#fff', fontFamily: 'var(--font-mono)' }}>[{p.coeffs.join(', ')}]</td>
+                            <td style={{ padding: '6px 4px', color: '#94a3b8', fontFamily: 'var(--font-mono)' }}>
+                              [{p.dataPreview.slice(0, 3).join(', ')}, ...]
+                            </td>
                           </tr>
                         ))}
                       </tbody>
                     </table>
-                  </div>
 
-                  <div style={{ fontSize: '0.68rem', color: '#94a3b8', marginBottom: '4px', fontWeight: 600 }}>
-                    Gaussian Elimination Operation Trace ({gaussJordan.steps.length} steps)
-                  </div>
-                  <div style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '4px',
-                    marginBottom: '10px',
-                    maxHeight: '180px',
-                    overflowY: 'auto',
-                    paddingRight: '4px',
-                  }}>
-                    {gaussJordan.steps.map((st, idx) => (
-                      <div key={idx} style={{
-                        fontSize: '0.68rem',
-                        color: '#e2e8f0',
-                        fontFamily: 'var(--font-mono)',
-                        background: 'rgba(15, 23, 42, 0.6)',
-                        padding: '4px 8px',
-                        borderRadius: '4px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '6px',
-                        borderLeft: st.op === 'swap' ? '2.5px solid #0284c7' :
-                                    st.op === 'pivot_normalize' ? '2.5px solid #7c3aed' :
-                                    st.op === 'forward_eliminate' ? '2.5px solid #d97706' :
-                                    '2.5px solid #059669',
-                      }}>
-                        <span style={{
-                          fontSize: '0.6rem',
-                          fontWeight: 700,
-                          padding: '1px 4px',
-                          borderRadius: '3px',
-                          background: st.op === 'swap' ? 'rgba(2, 132, 199, 0.3)' :
-                                      st.op === 'pivot_normalize' ? 'rgba(124, 58, 237, 0.3)' :
-                                      st.op === 'forward_eliminate' ? 'rgba(217, 119, 6, 0.3)' :
-                                      'rgba(5, 150, 105, 0.3)',
-                          color: st.op === 'swap' ? '#38bdf8' :
-                                 st.op === 'pivot_normalize' ? '#c084fc' :
-                                 st.op === 'forward_eliminate' ? '#fbbf24' :
-                                 '#34d399',
-                          textTransform: 'uppercase',
-                          flexShrink: 0,
-                        }}>
-                          {st.op === 'pivot_normalize' ? 'NORM' :
-                           st.op === 'forward_eliminate' ? 'FWD ELIM' :
-                           st.op === 'back_substitute' ? 'BACK SUB' :
-                           st.op.toUpperCase()}
-                        </span>
-                        <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                          {st.desc}
-                        </span>
+                    <div style={{ borderTop: '1px solid #1e3a5f', paddingTop: '10px' }}>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px', textAlign: 'center', marginBottom: '8px' }}>
+                        <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
+                          <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Active Received</div>
+                          <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#38bdf8', fontFamily: 'var(--font-mono)' }}>{activeReceivedPackets.length}</div>
+                        </div>
+                        <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
+                          <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Independent</div>
+                          <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#10b981', fontFamily: 'var(--font-mono)' }}>{activeRank}</div>
+                        </div>
+                        <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
+                          <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Dependent</div>
+                          <div style={{ fontSize: '0.95rem', fontWeight: 800, color: (activeReceivedPackets.length - activeRank) > 0 ? '#fbbf24' : '#64748b', fontFamily: 'var(--font-mono)' }}>
+                            {Math.max(0, activeReceivedPackets.length - activeRank)}
+                          </div>
+                        </div>
+                        <div style={{ background: 'rgba(15, 23, 42, 0.6)', padding: '6px 4px', borderRadius: '4px', border: '1px solid #1e3a5f' }}>
+                          <div style={{ fontSize: '0.65rem', color: '#94a3b8' }}>Gen Size (K)</div>
+                          <div style={{ fontSize: '0.95rem', fontWeight: 800, color: '#fff', fontFamily: 'var(--font-mono)' }}>{K}</div>
+                        </div>
                       </div>
-                    ))}
+                      {activeRank >= K ? (
+                        <div style={{ fontSize: '0.75rem', color: '#10b981', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <CheckCircle2 size={14} color="#10b981" />
+                          <span>Sufficient for decoding (Rank {activeRank} = K)</span>
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: '0.75rem', color: '#fbbf24', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <AlertCircle size={14} color="#fbbf24" />
+                          <span>Waiting for more independent packets (Rank {activeRank} &lt; {K})</span>
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* CARD 2: 2. Coefficient Matrix (A) & Coded Data Matrix (C) */}
+              <div className="glass-panel" style={{ padding: '16px', background: '#0d1b2e', borderRadius: '10px', border: '1px solid #1e3a5f' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{
+                    width: '20px',
+                    height: '20px',
+                    borderRadius: '50%',
+                    background: '#2563eb',
+                    color: '#fff',
+                    fontSize: '0.72rem',
+                    fontWeight: 800,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}>
+                    2
+                  </span>
+                  <h3 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff', margin: 0 }}>
+                    Coefficient Matrix (A)
+                  </h3>
+                </div>
+                <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: '8px' }}>
+                  Assembled dynamically from {activeMatrixA.length} received packets ({activeMatrixA.length} × {K})
+                </div>
+
+                {activeMatrixA.length === 0 ? (
+                  <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748b', fontSize: '0.78rem', background: 'rgba(15, 23, 42, 0.4)', borderRadius: '6px' }}>
+                    Coefficient matrix A will assemble as packets are received over UDP.
                   </div>
+                ) : (
+                  <>
+                    <div style={{ textAlign: 'center', marginBottom: '10px' }}>
+                      {renderBracketMatrix(activeMatrixA, '#38bdf8')}
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px', fontSize: '0.78rem' }}>
+                      <span style={{ color: '#fff', fontWeight: 700, fontFamily: 'var(--font-mono)' }}>
+                        Rank = {activeRank} <span style={{ color: '#94a3b8', fontWeight: 400 }}>({activeRank} indep, {Math.max(0, activeReceivedPackets.length - activeRank)} dep, k = {K})</span>
+                      </span>
+                      {activeRank >= K ? (
+                        <span style={{ color: '#10b981', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <CheckCircle2 size={14} color="#10b981" /> Full Rank
+                        </span>
+                      ) : (
+                        <span style={{ color: '#fbbf24', fontWeight: 700, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <AlertCircle size={14} color="#fbbf24" /> Incomplete Rank
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ borderTop: '1px solid #1e3a5f', paddingTop: '10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                        <span style={{
+                          width: '18px',
+                          height: '18px',
+                          borderRadius: '50%',
+                          background: '#2563eb',
+                          color: '#fff',
+                          fontSize: '0.68rem',
+                          fontWeight: 800,
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                        }}>
+                          2
+                        </span>
+                        <div style={{ fontSize: '0.8rem', fontWeight: 700, color: '#fff' }}>
+                          Coded Data Matrix (C) ({activeMatrixC.length} × {activeMatrixC[0]?.length || 3})
+                        </div>
+                      </div>
+                      <div style={{ fontSize: '0.7rem', color: '#94a3b8', marginBottom: '6px' }}>
+                        (Each row is a received packet payload preview)
+                      </div>
+                      <div style={{ textAlign: 'center' }}>
+                        {renderBracketMatrix(activeMatrixC, '#a855f7')}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* CARD 3: 3. Gaussian Elimination (GF(256)) */}
+              <div className="glass-panel" style={{ padding: '16px', background: '#0d1b2e', borderRadius: '10px', border: '1px solid #1e3a5f' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                  <span style={{
+                    width: '20px',
+                    height: '20px',
+                    borderRadius: '50%',
+                    background: '#2563eb',
+                    color: '#fff',
+                    fontSize: '0.72rem',
+                    fontWeight: 800,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}>
+                    3
+                  </span>
+                  <h3 style={{ fontSize: '0.88rem', fontWeight: 700, color: '#fff', margin: 0 }}>
+                    Gaussian Elimination (GF(256))
+                  </h3>
+                </div>
+                <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginBottom: '8px' }}>
+                  Row operations applied simultaneously to augmented matrix [A | C]
+                </div>
+
+                {activeMatrixA.length === 0 ? (
+                  <div style={{ padding: '24px 12px', textAlign: 'center', color: '#64748b', fontSize: '0.78rem', background: 'rgba(15, 23, 42, 0.4)', borderRadius: '6px' }}>
+                    Gauss-Jordan elimination operations will trace row-by-row once packets arrive.
+                  </div>
+                ) : (
+                  <>
+                    <div style={{ fontSize: '0.68rem', color: '#94a3b8', marginBottom: '4px', fontWeight: 600 }}>
+                      Augmented Matrix [A | C] ({activeMatrixA.length} × {K + (activeMatrixC[0]?.length || 3)})
+                    </div>
+                    <div style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      borderLeft: '2.5px solid #38bdf8',
+                      borderRight: '2.5px solid #38bdf8',
+                      borderRadius: '4px',
+                      padding: '3px 8px',
+                      background: 'rgba(15, 23, 42, 0.6)',
+                      marginBottom: '8px',
+                      width: '100%',
+                      justifyContent: 'center',
+                    }}>
+                      <table style={{ borderCollapse: 'collapse', fontFamily: 'var(--font-mono)', fontSize: '0.72rem', textAlign: 'center' }}>
+                        <tbody>
+                          {activeMatrixA.map((row, rIdx) => (
+                            <tr key={rIdx}>
+                              {row.map((val, cIdx) => (
+                                <td key={cIdx} style={{ padding: '2px 5px', color: '#38bdf8' }}>
+                                  {displayFormat === 'hex' ? `0x${Number(val).toString(16).padStart(2, '0').toUpperCase()}` : val}
+                                </td>
+                              ))}
+                              <td style={{ padding: '2px 4px', color: '#64748b' }}>|</td>
+                              {(activeMatrixC[rIdx] || [0, 0, 0]).map((val, cIdx) => (
+                                <td key={cIdx} style={{ padding: '2px 5px', color: '#e2e8f0' }}>
+                                  {displayFormat === 'hex' ? `0x${Number(val).toString(16).padStart(2, '0').toUpperCase()}` : val}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <div style={{ fontSize: '0.68rem', color: '#94a3b8', marginBottom: '4px', fontWeight: 600 }}>
+                      Decoder Operations Trace ({activeGaussSteps.length} operations)
+                    </div>
+                    <div style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '4px',
+                      marginBottom: '10px',
+                      maxHeight: '180px',
+                      overflowY: 'auto',
+                      paddingRight: '4px',
+                    }}>
+                      {activeGaussSteps.map((st, idx) => (
+                        <div key={idx} style={{
+                          fontSize: '0.68rem',
+                          color: '#e2e8f0',
+                          fontFamily: 'var(--font-mono)',
+                          background: 'rgba(15, 23, 42, 0.6)',
+                          padding: '4px 8px',
+                          borderRadius: '4px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          borderLeft: st.op === 'swap' ? '2.5px solid #0284c7' :
+                                      st.op === 'pivot_normalize' ? '2.5px solid #7c3aed' :
+                                      st.op === 'forward_eliminate' ? '2.5px solid #d97706' :
+                                      '2.5px solid #059669',
+                        }}>
+                          <span style={{
+                            fontSize: '0.6rem',
+                            fontWeight: 700,
+                            padding: '1px 4px',
+                            borderRadius: '3px',
+                            background: st.op === 'swap' ? 'rgba(2, 132, 199, 0.3)' :
+                                        st.op === 'pivot_normalize' ? 'rgba(124, 58, 237, 0.3)' :
+                                        st.op === 'forward_eliminate' ? 'rgba(217, 119, 6, 0.3)' :
+                                        'rgba(5, 150, 105, 0.3)',
+                            color: st.op === 'swap' ? '#38bdf8' :
+                                   st.op === 'pivot_normalize' ? '#c084fc' :
+                                   st.op === 'forward_eliminate' ? '#fbbf24' :
+                                   '#34d399',
+                            textTransform: 'uppercase',
+                            flexShrink: 0,
+                          }}>
+                            {st.op === 'pivot_normalize' ? 'NORM' :
+                             st.op === 'forward_eliminate' ? 'FWD ELIM' :
+                             st.op === 'back_substitute' ? 'BACK SUB' :
+                             st.op.toUpperCase()}
+                          </span>
+                          <span style={{ flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                            {st.desc}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+
 
                   {/* Final Reduced Augmented Matrix [A_reduced | C_reduced] */}
                   <div style={{ borderTop: '1px solid #1e3a5f', paddingTop: '10px', marginBottom: '10px' }}>
@@ -1180,6 +1571,7 @@ export default function EquationLabScreen() {
               </div>
             </div>
           </div>
+        </div>
         )}
       </main>
     </div>

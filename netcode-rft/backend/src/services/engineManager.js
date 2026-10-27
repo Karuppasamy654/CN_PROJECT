@@ -1,7 +1,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { ENGINE_BIN, NS3_BIN, NETANIM_BIN, SIMULATOR_TYPE, ROOT_DIR, RESULTS_DIR, toWslPath } = require('../config');
+const { ENGINE_BIN, NS3_BIN, NETANIM_BIN, SIMULATOR_TYPE, ROOT_DIR, RESULTS_DIR, toWslPath, toWinPath } = require('../config');
 const store = require('./store');
 
 if (!fs.existsSync(RESULTS_DIR)) {
@@ -195,18 +195,30 @@ class EngineManager {
       if (passed && transfer.autoNetAnim !== false) {
         try {
           if (fs.existsSync(traceFilePathWin)) {
-            console.log(`[Engine] Auto-launching NetAnim desktop viewer for trace: ${traceFilePathWsl}`);
-            const launched = this.launchNetAnim(traceFilePathWsl);
-            if (this.io) {
-              const netanimPayload = {
-                status: 'launched',
-                transferId,
-                tracePath: traceFilePathWsl,
-                traceFileName,
-                success: launched,
-              };
-              this.io.to(transferId).emit('netanim_launched', netanimPayload);
-              this.io.emit('netanim_launched', netanimPayload);
+            const stats = fs.statSync(traceFilePathWin);
+            if (stats.size > 100) {
+              const traceHead = fs.readFileSync(traceFilePathWin, 'utf8');
+              const isValidXml = traceHead.includes('<anim') && traceHead.includes('</anim>');
+              if (isValidXml) {
+                console.log(`[Engine] Auto-launching NetAnim desktop viewer for verified trace (${stats.size} bytes): ${traceFilePathWsl}`);
+                const launched = this.launchNetAnim(traceFilePathWsl);
+                if (this.io) {
+                  const netanimPayload = {
+                    status: 'launched',
+                    transferId,
+                    tracePath: traceFilePathWsl,
+                    traceFileName,
+                    success: launched,
+                    traceSizeBytes: stats.size,
+                  };
+                  this.io.to(transferId).emit('netanim_launched', netanimPayload);
+                  this.io.emit('netanim_launched', netanimPayload);
+                }
+              } else {
+                console.warn(`[Engine] Trace XML appears incomplete (missing <anim> tags): ${traceFilePathWin}`);
+              }
+            } else {
+              console.warn(`[Engine] Trace file too small (${stats.size} bytes): ${traceFilePathWin}`);
             }
           } else {
             console.warn(`[Engine] Trace file not found at: ${traceFilePathWin}`);
@@ -266,12 +278,21 @@ class EngineManager {
   launchNetAnim(tracePath) {
     const isWin = process.platform === 'win32';
     const traceWsl = tracePath ? toWslPath(tracePath) : '';
+    const traceWin = tracePath ? toWinPath(tracePath) : '';
+
+    if (traceWin && !fs.existsSync(traceWin)) {
+      console.warn(`[NETANIM] Trace file does not exist on disk: ${traceWin} (WSL: ${traceWsl})`);
+      return false;
+    }
+
     const bin = NETANIM_BIN || '/usr/local/bin/netanim';
     const cmd = isWin ? 'wsl' : bin;
-    const bashScript = `DISPLAY="\${DISPLAY:-:0}" WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}" XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}" ${bin} "${traceWsl}"`;
+    const bashScript = traceWsl
+      ? `DISPLAY="\${DISPLAY:-:0}" WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}" XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}" ${bin} "${traceWsl}"`
+      : `DISPLAY="\${DISPLAY:-:0}" WAYLAND_DISPLAY="\${WAYLAND_DISPLAY:-wayland-0}" XDG_RUNTIME_DIR="\${XDG_RUNTIME_DIR:-/mnt/wslg/runtime-dir}" ${bin}`;
     const args = isWin
       ? ['bash', '-lc', bashScript]
-      : [tracePath || ''];
+      : (tracePath ? [tracePath] : []);
 
     try {
       console.log(`[NETANIM] Spawning desktop NetAnim viewer for: ${traceWsl || 'default'}`);

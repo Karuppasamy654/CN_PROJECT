@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const fs = require('fs');
+const { toWinPath, toWslPath } = require('../config');
 const gf256 = require('../services/gf256Service');
 const rlnc = require('../services/rlncService');
 const store = require('../services/store');
@@ -62,7 +63,7 @@ router.get('/calculations/transfer/:id', (req, res) => {
     }));
 
   // Extract transmitted packets
-  const transmittedPackets = events
+  const transmittedPackets = totalBlocks === 0 ? [] : events
     .filter(e => e.type === 'packet_transmitted' || e.type === 'packet_sent')
     .map(e => {
       const seqId = e.seq_id ?? e.packet_index ?? 0;
@@ -110,35 +111,111 @@ router.get('/calculations/transfer/:id', (req, res) => {
   const genBlocks = totalBlocks > 0 ? Math.max(0, Math.min(t.K, totalBlocks - startBlock)) : 0;
   targetK = genBlocks > 0 ? genBlocks : (totalBlocks > 0 ? Math.min(t.K, totalBlocks) : 0);
 
+  // Extract all real decoder matrix update events from NS-3 C++
+  const decoderUpdates = events
+    .filter(e => e.type === 'decoder_matrix_update' && (e.gen_id ?? 0) === selectedGen)
+    .sort((a, b) => (a.time || 0) - (b.time || 0));
+
+  // Extract all physical drops in this generation, strictly distinguishing forward data drops from reverse ACK drops
+  const droppedPackets = events
+    .filter(e => (e.type === 'packet_dropped' || e.type === 'phy_drop') &&
+                 (e.direction === 'forward' || (!e.direction && e.pkt_type !== 'ACK' && e.pkt_type !== 'GenACK' && e.pkt_type !== 'FinACK')) &&
+                 (e.gen_id ?? 0) === selectedGen)
+    .map(e => ({
+      seqId: e.seq_id,
+      genId: e.gen_id ?? 0,
+      reason: e.drop_reason || e.reason || 'RateErrorModel_PhyRxDrop',
+      time: e.time,
+      isDropped: true,
+      direction: 'forward',
+    }));
+
+  const reverseDroppedAcks = events
+    .filter(e => (e.type === 'packet_dropped' || e.type === 'phy_drop') &&
+                 (e.direction === 'reverse' || e.pkt_type === 'ACK' || e.pkt_type === 'GenACK' || e.pkt_type === 'FinACK') &&
+                 (e.gen_id ?? 0) === selectedGen)
+    .map(e => ({
+      seqId: e.seq_id,
+      genId: e.gen_id ?? 0,
+      reason: e.drop_reason || e.reason || 'RateErrorModel_PhyRxDrop',
+      time: e.time,
+      isDropped: true,
+      direction: 'reverse',
+    }));
+
   // Build complete list of received packets strictly for the selected transfer and generation
-  const genPackets = receivedPackets.filter(p => {
+  const rawGenPackets = receivedPackets.filter(p => {
     const pGen = (p.genId !== undefined && p.genId !== null) ? p.genId : 0;
     return pGen === selectedGen;
   }).map(p => {
-    // Ensure every packet has coding coefficients matching targetK
     let coeffs = p.coeffs;
     if (!coeffs || coeffs.length !== targetK) {
       if (targetK > 0) {
-        // If systematic, generate standard unit vector; otherwise pad/truncate
         coeffs = rlnc.generateSystematicVector(targetK, p.seqId % targetK);
       } else {
         coeffs = [];
       }
     }
+    const equation = rlnc.formatEquation(coeffs, coeffs.length);
     return {
       ...p,
       coeffs,
+      equation,
     };
   });
+
+  // Timeline / Packet step filtering if requested
+  const timeQuery = req.query.time !== undefined && req.query.time !== '' ? parseFloat(req.query.time) : null;
+  const seqQuery = req.query.packetId !== undefined && req.query.packetId !== ''
+    ? parseInt(req.query.packetId, 10)
+    : (req.query.seqId !== undefined && req.query.seqId !== '' ? parseInt(req.query.seqId, 10) : null);
+
+  let genPackets = rawGenPackets;
+  let activeDecoderUpdates = decoderUpdates;
+  if (timeQuery !== null && !isNaN(timeQuery)) {
+    genPackets = rawGenPackets.filter(p => (p.time || 0) <= timeQuery);
+    activeDecoderUpdates = decoderUpdates.filter(u => (u.time || 0) <= timeQuery);
+  } else if (seqQuery !== null && !isNaN(seqQuery)) {
+    genPackets = rawGenPackets.filter(p => p.seqId <= seqQuery);
+    activeDecoderUpdates = decoderUpdates.filter(u => u.seq_id <= seqQuery);
+  }
+
+  // Build decoder history of step-by-step augmented matrix evolution
+  const decoderHistory = decoderUpdates.map((u, idx) => ({
+    stepIndex: idx,
+    seqId: u.seq_id,
+    packetId: u.packet_id,
+    time: u.time,
+    rankBefore: u.rank_before,
+    rankAfter: u.rank_after,
+    innovative: !!u.innovative,
+    coeffs: u.coeffs,
+    equation: u.equation || (u.coeffs ? rlnc.formatEquation(u.coeffs, u.coeffs.length) : ''),
+    matrixA: u.matrix_a,
+    matrixY: u.matrix_y,
+    operations: u.operations || [],
+  }));
+
+  const latestStep = activeDecoderUpdates.length > 0
+    ? activeDecoderUpdates[activeDecoderUpdates.length - 1]
+    : null;
 
   let reconBuf = null;
   let srcBuf = null;
   try {
-    if (t.outPath && fs.existsSync(t.outPath)) {
-      reconBuf = fs.readFileSync(t.outPath);
+    const candidateOutPaths = [t.outPath, toWinPath(t.outPath), toWslPath(t.outPath)].filter(Boolean);
+    for (const p of candidateOutPaths) {
+      if (fs.existsSync(p)) {
+        reconBuf = fs.readFileSync(p);
+        break;
+      }
     }
-    if (t.filePath && fs.existsSync(t.filePath)) {
-      srcBuf = fs.readFileSync(t.filePath);
+    const candidateFilePaths = [t.filePath, toWinPath(t.filePath), toWslPath(t.filePath)].filter(Boolean);
+    for (const p of candidateFilePaths) {
+      if (fs.existsSync(p)) {
+        srcBuf = fs.readFileSync(p);
+        break;
+      }
     }
   } catch (err) {
     console.error('Error reading file buffers for calculations:', err);
@@ -169,7 +246,7 @@ router.get('/calculations/transfer/:id', (req, res) => {
     return [0, 0, 0];
   });
 
-  // Build Matrix A (M x K) directly from ALL received packets
+  // Build Matrix A (M x K) directly from ALL received packets up to current timeline filter
   const matrixA = genPackets.map(p => [...p.coeffs]);
   // Initial Matrix C preview (M x preview) for readable UI table rendering
   const matrixC = fullMatrixC.map(row => row.slice(0, 3));
@@ -209,11 +286,26 @@ router.get('/calculations/transfer/:id', (req, res) => {
         }
       }
 
+      // If we have actual C++ decoder operations for this step, merge them
+      const combinedSteps = (latestStep && latestStep.operations && latestStep.operations.length > 0)
+        ? latestStep.operations.map(op => ({
+            op: op.op || 'op',
+            desc: op.desc || `${(op.op || 'OP').toUpperCase()} on Row ${op.row || op.target_row || 1}`,
+            row: op.row,
+            targetRow: op.target_row,
+            pivotRow: op.pivot_row,
+            factor: op.factor,
+          }))
+        : rawGj.steps;
+
       // Format gaussJordan response: matrixA keeps all M rows, matrixC has previews for all M rows
       gaussJordan = {
         ...rawGj,
-        matrixA: rawGj.matrixA, // all M rows (4 indep identity, 1 zero row for K=4, M=5)
-        matrixC: rawGj.matrixC.map(row => row.slice(0, 3)), // preview of all M reduced rows ([0,0,0] for zero row)
+        rank: latestStep ? latestStep.rank_after : rawGj.rank,
+        isFullRank: latestStep ? (latestStep.rank_after >= targetK) : rawGj.isFullRank,
+        matrixA: (latestStep && latestStep.matrix_a) ? latestStep.matrix_a : rawGj.matrixA,
+        matrixC: (latestStep && latestStep.matrix_y) ? latestStep.matrix_y.map(r => r.slice(0, 3)) : rawGj.matrixC.map(row => row.slice(0, 3)),
+        steps: combinedSteps,
         fullPayloadLength: fullMatrixC[0]?.length || 0,
       };
     } catch (e) {
@@ -221,11 +313,20 @@ router.get('/calculations/transfer/:id', (req, res) => {
     }
   }
 
-  const rank = gaussJordan ? gaussJordan.rank : 0;
-  const isFullRank = Boolean(gaussJordan && gaussJordan.rank >= targetK && targetK > 0);
+  const rank = gaussJordan ? gaussJordan.rank : (latestStep ? latestStep.rank_after : 0);
+  const isFullRank = Boolean(rank >= targetK && targetK > 0);
   const totalReceivedPackets = genPackets.length;
   const independentEquations = rank;
   const dependentEquations = Math.max(0, totalReceivedPackets - independentEquations);
+
+  const gf256Info = {
+    field: 'GF(256)',
+    irreduciblePolynomial: '0x11D',
+    polynomialDescription: 'P(x) = x^8 + x^4 + x^3 + x^2 + 1',
+    generatorElement: '0x02',
+    addition: 'Bitwise XOR (⊕)',
+    multiplication: 'Log/Exp table lookup with reduction modulo 0x11D',
+  };
 
   // File splitting summary
   const fileSplitting = {
@@ -262,18 +363,34 @@ router.get('/calculations/transfer/:id', (req, res) => {
     attempt: e.attempt !== undefined ? e.attempt : (e.retry_count + 1),
     time: e.time,
   }));
-  const rudpDrops = events.filter(e => e.type === 'packet_dropped').map(e => ({
-    seqId: e.seq_id,
-    attempt: e.attempt !== undefined ? e.attempt : 1,
-    reason: e.reason,
-    time: e.time,
-  }));
+  const rudpDrops = events
+    .filter(e => (e.type === 'packet_dropped' || e.type === 'phy_drop') &&
+                 (e.direction === 'forward' || (!e.direction && e.pkt_type !== 'ACK' && e.pkt_type !== 'FinACK')))
+    .map(e => ({
+      seqId: e.seq_id,
+      attempt: e.attempt !== undefined ? e.attempt : 1,
+      reason: e.drop_reason || e.reason,
+      time: e.time,
+      direction: 'forward',
+    }));
+
+  const rudpReverseDrops = events
+    .filter(e => (e.type === 'packet_dropped' || e.type === 'phy_drop') &&
+                 (e.direction === 'reverse' || e.pkt_type === 'ACK' || e.pkt_type === 'FinACK'))
+    .map(e => ({
+      seqId: e.seq_id,
+      reason: e.drop_reason || e.reason,
+      time: e.time,
+      direction: 'reverse',
+    }));
 
   const rudpProtocolMetrics = {
     originalBlocks: totalBlocks,
-    transmissionAttempts: events.filter(e => e.type === 'packet_transmitted').length,
-    uniquePacketsReceived: (new Set(events.filter(e => e.type === 'packet_received').map(e => e.seq_id))).size,
+    transmissionAttempts: totalBlocks === 0 ? 0 : events.filter(e => e.type === 'packet_transmitted').length,
+    uniquePacketsReceived: totalBlocks === 0 ? 0 : (new Set(events.filter(e => e.type === 'packet_received').map(e => e.seq_id))).size,
     droppedPackets: rudpDrops.length,
+    forwardDrops: rudpDrops.length,
+    reverseDrops: rudpReverseDrops.length,
     retransmissions: rudpRetransmits.length,
     acksSent: rudpAcksSent.length || rudpAcksReceived.length,
     acksReceived: rudpAcksReceived.length,
@@ -294,6 +411,13 @@ router.get('/calculations/transfer/:id', (req, res) => {
     transmittedPackets,
     receivedPackets: genPackets,
     allReceivedPackets: receivedPackets,
+    droppedPackets,
+    reverseDroppedAcks,
+    decoderHistory,
+    latestStep,
+    timeFilter: timeQuery,
+    seqFilter: seqQuery,
+    gf256Info,
     matrixA,
     matrixC,
     rank,

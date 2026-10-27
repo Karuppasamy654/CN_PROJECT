@@ -319,12 +319,13 @@ export default function ExperimentHistoryScreen() {
                   <th style={{ padding: '10px 12px' }}>Status</th>
                   <th style={{ padding: '10px 12px' }}>SHA-256 Hash</th>
                   <th style={{ padding: '10px 12px' }}>Trace Path</th>
+                  <th style={{ padding: '10px 12px' }}>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={10} style={{ textAlign: 'center', padding: '24px', color: '#64748b' }}>
+                    <td colSpan={11} style={{ textAlign: 'center', padding: '24px', color: '#64748b' }}>
                       No matching experiment records found.
                     </td>
                   </tr>
@@ -393,6 +394,40 @@ export default function ExperimentHistoryScreen() {
                         </td>
                         <td style={{ padding: '10px 12px', fontFamily: 'var(--font-mono)', color: '#64748b', fontSize: '0.72rem' }}>
                           {exp.tracePath ? exp.tracePath.split('/').pop() : 'trace.xml'}
+                        </td>
+                        <td style={{ padding: '10px 12px' }}>
+                          <div style={{ display: 'flex', gap: '6px' }}>
+                            <button
+                              onClick={() => navigate(`/equations?transferId=${exp.id}`)}
+                              style={{
+                                background: '#1e3a5f',
+                                color: '#38bdf8',
+                                border: '1px solid #0284c7',
+                                padding: '3px 8px',
+                                borderRadius: '4px',
+                                fontSize: '0.7rem',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              Equations
+                            </button>
+                            <button
+                              onClick={() => navigate(`/netanim?transferId=${exp.id}`)}
+                              style={{
+                                background: '#1e293b',
+                                color: '#cbd5e1',
+                                border: '1px solid #334155',
+                                padding: '3px 8px',
+                                borderRadius: '4px',
+                                fontSize: '0.7rem',
+                                fontWeight: 600,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              NetAnim
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     );

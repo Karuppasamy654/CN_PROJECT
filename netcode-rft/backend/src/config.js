@@ -11,6 +11,14 @@ const NETANIM_BIN = process.env.NETANIM_BIN || '/usr/local/bin/netanim';
 
 function toWslPath(inputPath) {
   if (!inputPath) return '';
+  const str = String(inputPath).trim().replace(/\\/g, '/');
+  // If already a POSIX/WSL path (e.g. /mnt/f/... or /home/...)
+  if (str.startsWith('/mnt/') || str.startsWith('/home/') || str.startsWith('/usr/') || str.startsWith('/tmp/')) {
+    return str;
+  }
+  if (str.startsWith('/') && !str.match(/^\/[a-zA-Z]:/)) {
+    return str;
+  }
   const resolved = path.resolve(inputPath).replace(/\\/g, '/');
   if (process.platform !== 'win32') {
     return resolved;
@@ -21,6 +29,17 @@ function toWslPath(inputPath) {
     return `/mnt/${drive}/${match[2]}`;
   }
   return resolved;
+}
+
+function toWinPath(inputPath) {
+  if (!inputPath) return '';
+  const str = String(inputPath).trim().replace(/\\/g, '/');
+  const match = str.match(/^\/mnt\/([a-zA-Z])\/(.*)$/);
+  if (match) {
+    const drive = match[1].toUpperCase();
+    return path.normalize(`${drive}:/${match[2]}`);
+  }
+  return path.resolve(inputPath);
 }
 
 module.exports = {
@@ -36,5 +55,6 @@ module.exports = {
   SIMULATOR_TYPE: process.env.SIMULATOR || 'ns3',
   MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB
   toWslPath,
+  toWinPath,
 };
 

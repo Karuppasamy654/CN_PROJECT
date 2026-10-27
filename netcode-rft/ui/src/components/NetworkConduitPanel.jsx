@@ -14,6 +14,7 @@ import {
   Clock,
   Check,
 } from 'lucide-react';
+import { isMatchingTransfer } from '../context/TransferContext';
 
 export default function NetworkConduitPanel({
   events = [],
@@ -31,6 +32,13 @@ export default function NetworkConduitPanel({
     mediaQuery.addEventListener('change', handler);
     return () => mediaQuery.removeEventListener('change', handler);
   }, []);
+
+  // Filter events strictly to current active transfer to prevent stale event pollution
+  const relevantEvents = useMemo(() => {
+    if (!events || events.length === 0) return [];
+    if (!transfer?.id) return events;
+    return events.filter(e => !e.transfer_id || isMatchingTransfer(e.transfer_id, transfer.id));
+  }, [events, transfer?.id]);
 
   // Animation duration (responsive, visible ~0.85 seconds)
   const animDuration = prefersReducedMotion ? 0.1 : 0.85;
@@ -108,9 +116,9 @@ export default function NetworkConduitPanel({
   // INGESTION: Read authoritative engine events into the queue
   // -------------------------------------------------------------
   useEffect(() => {
-    if (!events || events.length === 0) return;
+    if (!relevantEvents || relevantEvents.length === 0) return;
 
-    for (const e of events) {
+    for (const e of relevantEvents) {
       const seqId = e.seq_id ?? e.packet_index ?? 0;
       const genId = e.gen_id ?? 0;
 
@@ -142,7 +150,7 @@ export default function NetworkConduitPanel({
         }
       }
     }
-  }, [events]);
+  }, [relevantEvents]);
 
   // -------------------------------------------------------------
   // CONTROLLER LOOP: Strict Sequential State Machine
@@ -156,9 +164,9 @@ export default function NetworkConduitPanel({
       return;
     }
 
-    const hasInitEvent = events.some(e => e.type === 'handshake_step' && e.step >= 1);
-    const hasReadyEvent = events.some(e => e.type === 'handshake_step' && e.step >= 2);
-    const hasStartEvent = events.some(e => e.type === 'handshake_step' && e.step >= 3);
+    const hasInitEvent = relevantEvents.some(e => e.type === 'handshake_step' && e.step >= 1);
+    const hasReadyEvent = relevantEvents.some(e => e.type === 'handshake_step' && e.step >= 2);
+    const hasStartEvent = relevantEvents.some(e => e.type === 'handshake_step' && e.step >= 3);
     const hasAnyHandshake = hasInitEvent || hasReadyEvent || hasStartEvent;
 
     // Direct transition for NS-3 / protocols without synthetic application handshake
@@ -193,7 +201,7 @@ export default function NetworkConduitPanel({
         direction: 'forward', // L -> R
         target: 'receiver',
         color: '#f59e0b',
-        time: events.find(e => e.type === 'handshake_step' && e.step === 1)?.time || 0,
+        time: relevantEvents.find(e => e.type === 'handshake_step' && e.step === 1)?.time || 0,
       });
 
       queueStateRef.current.timerId = setTimeout(() => {
@@ -227,7 +235,7 @@ export default function NetworkConduitPanel({
         direction: 'reverse', // R -> L
         target: 'sender',
         color: '#10b981',
-        time: events.find(e => e.type === 'handshake_step' && e.step === 2)?.time || 0,
+        time: relevantEvents.find(e => e.type === 'handshake_step' && e.step === 2)?.time || 0,
       });
 
       queueStateRef.current.timerId = setTimeout(() => {
@@ -261,7 +269,7 @@ export default function NetworkConduitPanel({
         direction: 'forward', // L -> R
         target: 'receiver',
         color: '#38bdf8',
-        time: events.find(e => e.type === 'handshake_step' && e.step === 3)?.time || 0,
+        time: relevantEvents.find(e => e.type === 'handshake_step' && e.step === 3)?.time || 0,
       });
 
       queueStateRef.current.timerId = setTimeout(() => {
@@ -297,19 +305,20 @@ export default function NetworkConduitPanel({
         const isRetransmission = attempt > 1;
 
         // Resolve authentic outcome from engine events
-        const rxEventsForThis = events.filter(e =>
+        const rxEventsForThis = relevantEvents.filter(e =>
           e.type === 'packet_received' &&
-          (e.seq_id === nextData.seqId || e.packet_index === nextData.seqId)
+          (e.seq_id === nextData.seqId || e.packet_id === nextData.seqId || e.packet_index === nextData.seqId)
         );
 
-        const explicitDrop = events.some(e =>
+        const explicitDrop = relevantEvents.some(e =>
           (e.type === 'packet_dropped' || e.type === 'phy_drop') &&
-          (e.seq_id === nextData.seqId || e.packet_index === nextData.seqId)
+          (e.direction === 'forward' || (!e.direction && e.pkt_type !== 'ACK' && e.pkt_type !== 'GenACK' && e.pkt_type !== 'FinACK')) &&
+          (e.seq_id === nextData.seqId || e.packet_id === nextData.seqId || e.packet_index === nextData.seqId)
         );
 
-        const totalTxForThis = events.filter(e =>
+        const totalTxForThis = relevantEvents.filter(e =>
           (e.type === 'packet_transmitted' || e.type === 'packet_sent') &&
-          (e.seq_id === nextData.seqId || e.packet_index === nextData.seqId)
+          (e.seq_id === nextData.seqId || e.packet_id === nextData.seqId || e.packet_index === nextData.seqId)
         ).length;
 
         let isDropped = false;
@@ -318,15 +327,12 @@ export default function NetworkConduitPanel({
           if (attempt < totalTxForThis) {
             isDropped = true;
           } else {
-            isDropped = rxEventsForThis.length === 0 || explicitDrop;
+            isDropped = explicitDrop || (isCompleted && rxEventsForThis.length === 0);
           }
         } else {
-          // In RLNC: packet is dropped if receiver never received it, or an explicit drop was recorded
-          if (rxEventsForThis.length === 0) {
-            isDropped = true;
-          } else {
-            isDropped = explicitDrop;
-          }
+          // In RLNC: packet is dropped if an explicit forward physical drop was recorded,
+          // or if the transfer is already completed and receiver never received it
+          isDropped = explicitDrop || (isCompleted && rxEventsForThis.length === 0);
         }
 
         const target = isDropped ? 'router' : 'receiver';
@@ -420,7 +426,7 @@ export default function NetworkConduitPanel({
       }
     }
   }, [
-    events,
+    relevantEvents,
     animationPhase,
     activeAnimation,
     handshakeStatus,
@@ -432,9 +438,9 @@ export default function NetworkConduitPanel({
   ]);
 
   const lossPct = transfer?.lossRate !== undefined ? Math.round(Number(transfer.lossRate)) : 10;
-  const hasInitEvent = events.some(e => e.type === 'handshake_step' && e.step >= 1);
-  const hasReadyEvent = events.some(e => e.type === 'handshake_step' && e.step >= 2);
-  const hasStartEvent = events.some(e => e.type === 'handshake_step' && e.step >= 3);
+  const hasInitEvent = relevantEvents.some(e => e.type === 'handshake_step' && e.step >= 1);
+  const hasReadyEvent = relevantEvents.some(e => e.type === 'handshake_step' && e.step >= 2);
+  const hasStartEvent = relevantEvents.some(e => e.type === 'handshake_step' && e.step >= 3);
   const hasAnyHandshake = hasInitEvent || hasReadyEvent || hasStartEvent;
   const isHandshakeDone = hasAnyHandshake ? handshakeStatus.start === 'completed' : true;
 
@@ -755,8 +761,8 @@ export default function NetworkConduitPanel({
           >
             <Server size={24} />
           </motion.div>
-          <span style={{ fontSize: '0.76rem', fontWeight: 800, color: '#fbbf24', marginTop: '4px' }}>Network Router</span>
-          <span style={{ fontSize: '0.62rem', color: '#94a3b8' }}>Channel Impairment</span>
+          <span style={{ fontSize: '0.76rem', fontWeight: 800, color: '#fbbf24', marginTop: '4px' }}>P2P Channel</span>
+          <span style={{ fontSize: '0.62rem', color: '#94a3b8' }}>PHY RateErrorModel</span>
           <span
             style={{
               fontSize: '0.62rem',
@@ -955,7 +961,7 @@ export default function NetworkConduitPanel({
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
           <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#ef4444', boxShadow: '0 0 6px #ef4444' }} />
-          <span style={{ color: '#e2e8f0', fontWeight: 600 }}>Dropped (Stopped at Router)</span>
+          <span style={{ color: '#e2e8f0', fontWeight: 600 }}>Dropped (PHY Error Model Drop)</span>
         </div>
 
         {protocol === 'rudp' && (

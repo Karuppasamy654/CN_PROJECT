@@ -2,6 +2,7 @@
 #include "ns3/network-module.h"
 #include "ns3/internet-module.h"
 #include "ns3/point-to-point-module.h"
+#include "ns3/mobility-module.h"
 #include "ns3/netanim-module.h"
 
 #include "gf256.h"
@@ -27,41 +28,91 @@ NS_LOG_COMPONENT_DEFINE("NetcodeRftMainSimulation");
 static uint32_t g_forwardPhyDrops = 0;
 static uint32_t g_reversePhyDrops = 0;
 static uint32_t g_simTransferId = 1;
+static AnimationInterface *g_animPtr = nullptr;
+static uint32_t g_dropCounterId = 0;
 
-static void ForwardPhyDropSink(Ptr<const Packet> p) {
-    g_forwardPhyDrops++;
-    double nowSec = ns3::Simulator::Now().GetSeconds();
-    uint32_t seq = 0;
+static bool TryExtractNetcodeHeader(Ptr<const Packet> p, NetcodePacketHeader &nph) {
     try {
         Ptr<Packet> copy = p->Copy();
-        if (copy->GetSize() >= 30) {
+        if (copy->GetSize() >= 26) {
             copy->RemoveAtStart(2); // Skip PPP 2 bytes
             Ipv4Header ip;
             copy->RemoveHeader(ip);
             UdpHeader udp;
             copy->RemoveHeader(udp);
-            NetcodePacketHeader nph;
-            if (copy->GetSize() >= nph.GetSerializedSize()) {
+            if (copy->GetSize() >= 20) {
                 copy->RemoveHeader(nph);
-                if (nph.IsValid()) {
-                    seq = nph.GetSeqNum();
-                }
+                return nph.IsValid();
             }
         }
     } catch (...) {}
+    return false;
+}
+
+static void ForwardPhyDropSink(Ptr<const Packet> p) {
+    g_forwardPhyDrops++;
+    if (g_animPtr && g_dropCounterId > 0) {
+        g_animPtr->UpdateNodeCounter(g_dropCounterId, 1, g_forwardPhyDrops);
+    }
+    double nowSec = ns3::Simulator::Now().GetSeconds();
+    uint32_t seq = 0;
+    uint16_t gen = 0;
+    std::string pktTypeStr = "Data";
+    NetcodePacketHeader nph;
+    if (TryExtractNetcodeHeader(p, nph)) {
+        seq = nph.GetSeqNum();
+        gen = nph.GetGenId();
+        switch (nph.GetType()) {
+            case PKT_RLNC_SYSTEMATIC: pktTypeStr = "Systematic"; break;
+            case PKT_RLNC_CODED: pktTypeStr = "Mixed"; break;
+            case PKT_DATA: pktTypeStr = "Data"; break;
+            case PKT_ACK: pktTypeStr = "ACK"; break;
+            case PKT_RLNC_GEN_ACK: pktTypeStr = "GenACK"; break;
+            case PKT_RLNC_FIN: pktTypeStr = "FIN"; break;
+            case PKT_RLNC_FIN_ACK: pktTypeStr = "FinACK"; break;
+            default: pktTypeStr = "Data"; break;
+        }
+    }
 
     std::cout << "EVENT_JSON:{\"transfer_id\":\"" << g_simTransferId
               << "\",\"type\":\"packet_dropped\",\"protocol\":\"phy\",\"time\":" << nowSec
               << ",\"seq_id\":" << seq
-              << ",\"direction\":\"forward\",\"drop_count\":" << g_forwardPhyDrops << "}" << std::endl;
+              << ",\"packet_id\":" << seq
+              << ",\"gen_id\":" << gen
+              << ",\"pkt_type\":\"" << pktTypeStr << "\""
+              << ",\"direction\":\"forward\",\"drop_count\":" << g_forwardPhyDrops
+              << ",\"drop_reason\":\"RateErrorModel_PhyRxDrop\""
+              << ",\"source_node\":0,\"destination_node\":1}" << std::endl;
 }
 
 static void ReversePhyDropSink(Ptr<const Packet> p) {
     g_reversePhyDrops++;
     double nowSec = ns3::Simulator::Now().GetSeconds();
+    uint32_t seq = 0;
+    uint16_t gen = 0;
+    std::string pktTypeStr = "ACK";
+    NetcodePacketHeader nph;
+    if (TryExtractNetcodeHeader(p, nph)) {
+        seq = nph.GetSeqNum();
+        gen = nph.GetGenId();
+        switch (nph.GetType()) {
+            case PKT_ACK: pktTypeStr = "ACK"; break;
+            case PKT_RLNC_GEN_ACK: pktTypeStr = "GenACK"; break;
+            case PKT_FIN_ACK: pktTypeStr = "FinACK"; break;
+            case PKT_RLNC_FIN_ACK: pktTypeStr = "FinACK"; break;
+            default: pktTypeStr = "Control"; break;
+        }
+    }
+
     std::cout << "EVENT_JSON:{\"transfer_id\":\"" << g_simTransferId
               << "\",\"type\":\"packet_dropped\",\"protocol\":\"phy\",\"time\":" << nowSec
-              << ",\"direction\":\"reverse\",\"drop_count\":" << g_reversePhyDrops << "}" << std::endl;
+              << ",\"seq_id\":" << seq
+              << ",\"packet_id\":" << seq
+              << ",\"gen_id\":" << gen
+              << ",\"pkt_type\":\"" << pktTypeStr << "\""
+              << ",\"direction\":\"reverse\",\"drop_count\":" << g_reversePhyDrops
+              << ",\"drop_reason\":\"RateErrorModel_PhyRxDrop\""
+              << ",\"source_node\":1,\"destination_node\":0}" << std::endl;
 }
 
 int main(int argc, char *argv[]) {
@@ -180,6 +231,14 @@ int main(int argc, char *argv[]) {
     NodeContainer nodes;
     nodes.Create(2);
 
+    MobilityHelper mobility;
+    Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+    positionAlloc->Add(Vector(10.0, 50.0, 0.0));
+    positionAlloc->Add(Vector(90.0, 50.0, 0.0));
+    mobility.SetPositionAllocator(positionAlloc);
+    mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    mobility.Install(nodes);
+
     PointToPointHelper p2p;
     p2p.SetDeviceAttribute("DataRate", StringValue(bandwidthStr));
     p2p.SetChannelAttribute("Delay", StringValue(delayStr));
@@ -195,11 +254,17 @@ int main(int argc, char *argv[]) {
         Ptr<RateErrorModel> emForward = CreateObject<RateErrorModel>();
         emForward->SetAttribute("ErrorRate", DoubleValue(lossPercent / 100.0));
         emForward->SetAttribute("ErrorUnit", StringValue("ERROR_UNIT_PACKET"));
+        Ptr<UniformRandomVariable> uvForward = CreateObject<UniformRandomVariable>();
+        uvForward->SetStream(randomSeed * 2 + 1);
+        emForward->SetRandomVariable(uvForward);
         devices.Get(1)->SetAttribute("ReceiveErrorModel", PointerValue(emForward));
 
         Ptr<RateErrorModel> emReverse = CreateObject<RateErrorModel>();
         emReverse->SetAttribute("ErrorRate", DoubleValue(lossPercent / 100.0));
         emReverse->SetAttribute("ErrorUnit", StringValue("ERROR_UNIT_PACKET"));
+        Ptr<UniformRandomVariable> uvReverse = CreateObject<UniformRandomVariable>();
+        uvReverse->SetStream(randomSeed * 2 + 2);
+        emReverse->SetRandomVariable(uvReverse);
         devices.Get(0)->SetAttribute("ReceiveErrorModel", PointerValue(emReverse));
     }
 
@@ -222,7 +287,7 @@ int main(int argc, char *argv[]) {
     Ptr<Socket> receiverSocket = Socket::CreateSocket(nodes.Get(1), UdpSocketFactory::GetTypeId());
     receiverSocket->Bind(InetSocketAddress(receiverIp, port));
 
-    // NetAnim Configuration
+    // NetAnim Configuration (Direct 2-node Point-to-Point Topology)
     AnimationInterface anim(tracePath);
     anim.SetConstantPosition(nodes.Get(0), 10.0, 50.0);
     anim.SetConstantPosition(nodes.Get(1), 90.0, 50.0);
@@ -231,6 +296,9 @@ int main(int argc, char *argv[]) {
     anim.UpdateNodeColor(nodes.Get(0), 0, 120, 255);
     anim.UpdateNodeColor(nodes.Get(1), 40, 200, 80);
     anim.EnablePacketMetadata(true);
+
+    g_animPtr = &anim;
+    g_dropCounterId = anim.AddNodeCounter("Phy Drops", AnimationInterface::UINT32_COUNTER);
 
     // State tracked for final metrics
     bool transferSuccess = false;
@@ -375,12 +443,13 @@ int main(int argc, char *argv[]) {
         goodputKbps = (sourceData.size() * 8.0) / (simElapsedTime * 1000.0);
     }
 
-    // Observed physical loss percentage on application data packets
-    // In NS-3 P2P, packets not dropped by the error model arrive at the receiver.
-    // Therefore (dataPacketsSent - dataPacketsReceived) / dataPacketsSent is the true observed packet loss.
+    // Observed physical loss percentage on forward device:
+    // Numerator: actual forward physical drops recorded by PhyRxDrop callback (g_forwardPhyDrops)
+    // Denominator: total data packets that encountered the forward error model (g_forwardPhyDrops + dataPacketsReceived)
     double observedLossRate = 0.0;
-    if (dataPacketsSent > 0 && dataPacketsSent >= dataPacketsReceived) {
-        observedLossRate = ((double)(dataPacketsSent - dataPacketsReceived) / (double)dataPacketsSent) * 100.0;
+    uint32_t totalForwardTrials = g_forwardPhyDrops + dataPacketsReceived;
+    if (totalForwardTrials > 0) {
+        observedLossRate = ((double)g_forwardPhyDrops / (double)totalForwardTrials) * 100.0;
     }
 
     // Application-level Packet Delivery Ratio (PDR %)

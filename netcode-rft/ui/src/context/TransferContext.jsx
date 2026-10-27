@@ -28,6 +28,20 @@ export const STAGES = [
   { id: 10, name: 'Results', label: 'Results' },
 ];
 
+export function isMatchingTransfer(id1, id2) {
+  if (!id1 || !id2) return false;
+  const s1 = String(id1);
+  const s2 = String(id2);
+  if (s1 === s2) return true;
+  const clean1 = s1.replace(/^transfer-/, '');
+  const clean2 = s2.replace(/^transfer-/, '');
+  if (clean1 === clean2) return true;
+  const d1 = s1.replace(/\D/g, '');
+  const d2 = s2.replace(/\D/g, '');
+  if (d1.length >= 6 && d2.length >= 6 && (d1.endsWith(d2) || d2.endsWith(d1))) return true;
+  return false;
+}
+
 export function TransferProvider({ children }) {
   // Transfer configuration set when transfer is launched
   const [transfer, setTransfer] = useState(null);
@@ -110,26 +124,19 @@ export function TransferProvider({ children }) {
     });
     socketRef.current = socket;
 
-    const isMatchingTransfer = (id1, id2) => {
-      if (!id1 || !id2) return true;
-      const s1 = String(id1);
-      const s2 = String(id2);
-      if (s1 === s2) return true;
-      if (s1.includes(s2) || s2.includes(s1)) return true;
-      const d1 = s1.replace(/\D/g, '');
-      const d2 = s2.replace(/\D/g, '');
-      return d1.length > 0 && d2.length > 0 && (d1 === d2 || d1.includes(d2) || d2.includes(d1));
-    };
-
     socket.on('initial_events', (evList) => {
+      const currentActiveId = activeTransferIdRef.current;
       if (Array.isArray(evList) && evList.length > 0) {
+        const filtered = currentActiveId
+          ? evList.filter(ev => !ev.transfer_id || isMatchingTransfer(ev.transfer_id, currentActiveId))
+          : evList;
         setEvents((prev) => {
-          if (prev.length >= evList.length) return prev;
-          for (const ev of evList) {
+          if (prev.length >= filtered.length) return prev;
+          for (const ev of filtered) {
             const key = ev.event_id || `${ev.type}-${ev.seq_id ?? ''}-${ev.gen_id ?? ''}-${ev.step ?? ''}-${ev.time ?? ''}`;
             seenEventKeysRef.current.add(key);
           }
-          return evList;
+          return filtered;
         });
       }
     });
@@ -420,13 +427,9 @@ export function TransferProvider({ children }) {
     // Filter relevant events for the active transfer
     const currentId = transfer?.id || activeTransferIdRef.current;
     const transferEvents = events.filter(e => {
-      if (!currentId || !e.transfer_id) return true;
-      const s1 = String(currentId);
-      const s2 = String(e.transfer_id);
-      if (s1 === s2 || s1.includes(s2) || s2.includes(s1)) return true;
-      const d1 = s1.replace(/\D/g, '');
-      const d2 = s2.replace(/\D/g, '');
-      return d1.length > 0 && d2.length > 0 && (d1 === d2 || d1.includes(d2) || d2.includes(d1));
+      if (!currentId) return false;
+      if (!e.transfer_id) return true;
+      return isMatchingTransfer(e.transfer_id, currentId);
     });
 
     // Deduplicate events locally in case state was initialized with repeated items
@@ -446,6 +449,20 @@ export function TransferProvider({ children }) {
     const reconEvents = uniqueEvents.filter(e => e.type === 'reconstruction_progress');
     const matrixEvents = uniqueEvents.filter(e => e.type === 'decoder_matrix_update');
     const rudpRetransEvents = uniqueEvents.filter(e => e.type === 'rudp_retransmit');
+    const compEvent = uniqueEvents.find(e => e.type === 'transfer_completed');
+    const genCompleteCount = uniqueEvents.filter(e => e.type === 'generation_complete').length;
+
+    // Distinguish Forward Data Drops (Channel loss on sender->receiver) from Reverse Control Drops (ACKs)
+    const fwdDropEvents = dropEvents.filter(e =>
+      e.direction === 'forward' ||
+      (e.source_node === 0 && e.destination_node === 1) ||
+      (e.direction !== 'reverse' && e.pkt_type !== 'ACK' && e.pkt_type !== 'GenACK' && e.pkt_type !== 'FinACK')
+    );
+    const revDropEvents = dropEvents.filter(e =>
+      e.direction === 'reverse' ||
+      (e.source_node === 1 && e.destination_node === 0) ||
+      e.pkt_type === 'ACK' || e.pkt_type === 'GenACK' || e.pkt_type === 'FinACK'
+    );
 
     // 1. Receiver Status Label
     let statusLabel = 'Waiting for connection';
@@ -485,18 +502,18 @@ export function TransferProvider({ children }) {
 
     // Unique bytes assembled (for RUDP)
     const uniqueSeqReceived = new Set();
-    let uniqueReconstructedBytes = 0;
+    let rawUniqueReconstructedBytes = 0;
     for (const e of rxEvents) {
       if (!uniqueSeqReceived.has(e.seq_id)) {
         uniqueSeqReceived.add(e.seq_id);
-        uniqueReconstructedBytes += (e.payload_len || 0);
+        rawUniqueReconstructedBytes += (e.payload_len || 0);
       }
     }
 
     // 4. RLNC Metrics from real decoder events
     const latestMatrix = matrixEvents[matrixEvents.length - 1];
-    const currentRank = latestMatrix ? latestMatrix.rank : 0;
     const requiredRank = latestMatrix ? latestMatrix.required_rank : (transfer?.K || 4);
+    const currentRank = isVerified ? requiredRank : (latestMatrix ? latestMatrix.rank : 0);
     const codedPacketsReceived = rxEvents.filter(e => e.coeffs && e.coeffs.length > 0).length;
 
     // 5. Reconstruction progress percentage
@@ -510,7 +527,7 @@ export function TransferProvider({ children }) {
     } else {
       if (transfer?.protocol === 'rudp') {
         const totalExpected = transfer?.fileSize || 1;
-        progressPct = Math.min(99, Math.floor((uniqueReconstructedBytes / totalExpected) * 100));
+        progressPct = Math.min(99, Math.floor((rawUniqueReconstructedBytes / totalExpected) * 100));
       } else {
         const reconPct = latestRecon ? latestRecon.pct : 0;
         progressPct = Math.min(99, reconPct);
@@ -561,9 +578,10 @@ export function TransferProvider({ children }) {
 
     if (isVerified) {
       fileStatus = transfer?.filename || 'reconstructed_file';
-      fileSizeDisplay = verification?.reconSize
-        ? `${(verification.reconSize / 1024).toFixed(1)} KB`
-        : `${((transfer?.fileSize || 0) / 1024).toFixed(1)} KB`;
+      const finalVerifiedBytes = verification?.reconSize ?? transfer?.fileSize ?? 0;
+      fileSizeDisplay = finalVerifiedBytes < 1024
+        ? `${finalVerifiedBytes} bytes`
+        : `${(finalVerifiedBytes / 1024).toFixed(1)} KB`;
     } else if (transferLifecycle === TRANSFER_LIFECYCLE.FAILED) {
       fileStatus = 'Transfer failed';
       fileSizeDisplay = '0 bytes';
@@ -583,11 +601,31 @@ export function TransferProvider({ children }) {
       fileSizeDisplay = '0 bytes';
     }
 
-    // RLNC specific accounting
-    const reconstructedBytes = (transfer?.protocol === 'rudp')
-      ? uniqueReconstructedBytes
-      : (latestRecon ? Math.round((latestRecon.pct / 100) * (transfer?.fileSize || 0)) : 0);
-    const decodedGenerations = latestRecon ? Math.ceil((latestRecon.recovered_blocks || 0) / (transfer?.K || 4)) : 0;
+    // 9. Reconstructed File Bytes (Never display 0 B for a verified non-empty file!)
+    let reconstructedBytes = 0;
+    if (isVerified && verification?.reconSize !== undefined) {
+      reconstructedBytes = verification.reconSize;
+    } else if (isVerified && transfer?.fileSize !== undefined) {
+      reconstructedBytes = transfer.fileSize;
+    } else if (compEvent && compEvent.bytes_received !== undefined) {
+      reconstructedBytes = compEvent.bytes_received;
+    } else if (transferLifecycle === TRANSFER_LIFECYCLE.COMPLETED && transfer?.fileSize !== undefined) {
+      reconstructedBytes = transfer.fileSize;
+    } else if (transfer?.protocol === 'rudp') {
+      reconstructedBytes = rawUniqueReconstructedBytes;
+    } else if (latestRecon) {
+      reconstructedBytes = Math.round((latestRecon.pct / 100) * (transfer?.fileSize || 0));
+    }
+
+    const uniqueReconstructedBytes = (isVerified && verification?.reconSize !== undefined)
+      ? verification.reconSize
+      : ((compEvent && compEvent.bytes_received !== undefined) ? compEvent.bytes_received : rawUniqueReconstructedBytes);
+
+    const decodedGenerations = isVerified
+      ? (expectedGenerations ?? 0)
+      : (latestRecon
+          ? Math.ceil((latestRecon.recovered_blocks || 0) / (transfer?.K || 4))
+          : genCompleteCount);
 
     return {
       status: statusLabel,
@@ -602,7 +640,10 @@ export function TransferProvider({ children }) {
       extraRepairSent,
       rudpRetransmitCount,
       receivedPacketCount: rxEvents.length,
-      droppedPacketCount: dropEvents.length,
+      droppedPacketCount: fwdDropEvents.length,
+      forwardDroppedCount: fwdDropEvents.length,
+      reverseDroppedCount: revDropEvents.length,
+      totalDroppedCount: dropEvents.length,
       expectedBlocks,
       expectedGenerations,
       currentRank,

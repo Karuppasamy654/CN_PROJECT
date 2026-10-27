@@ -29,6 +29,8 @@ RudpSenderApplication::RudpSenderApplication()
       m_totalPackets(0),
       m_retryCount(0),
       m_initialDataSent(0),
+      m_dataRetransmissions(0),
+      m_finRetransmissions(0),
       m_totalRetries(0),
       m_finSent(0),
       m_totalAcks(0),
@@ -53,7 +55,7 @@ void RudpSenderApplication::Setup(ns3::Ptr<ns3::Socket> socket, ns3::Address pee
     m_transferId = transferId;
 
     if (m_data.empty()) {
-        m_totalPackets = 1; // Empty file packet
+        m_totalPackets = 0;
     } else {
         m_totalPackets = (m_data.size() + m_blockSize - 1) / m_blockSize;
     }
@@ -73,6 +75,11 @@ void RudpSenderApplication::StartApplication() {
     m_retryCount = 0;
     m_finished = false;
 
+    if (m_totalPackets == 0) {
+        SendFin();
+        return;
+    }
+
     // Send first packet
     SendPacket(m_currentSeq);
 }
@@ -84,6 +91,18 @@ void RudpSenderApplication::StopApplication() {
     if (m_socket) {
         m_socket->Close();
     }
+}
+
+static std::string PreviewToJsonArray(const uint8_t *data, size_t len, size_t maxLen = 6) {
+    std::ostringstream oss;
+    oss << "[";
+    size_t count = std::min(len, maxLen);
+    for (size_t i = 0; i < count; i++) {
+        if (i > 0) oss << ",";
+        oss << (int)data[i];
+    }
+    oss << "]";
+    return oss.str();
 }
 
 void RudpSenderApplication::SendPacket(uint32_t seq) {
@@ -120,9 +139,15 @@ void RudpSenderApplication::SendPacket(uint32_t seq) {
     double nowSec = ns3::Simulator::Now().GetSeconds();
     std::ostringstream oss;
     oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
-        << "\",\"type\":\"packet_sent\",\"protocol\":\"rudp\",\"time\":" << nowSec
-        << ",\"seq_id\":" << seq << ",\"retry\":" << m_retryCount
-        << ",\"payload_len\":" << len << "}";
+        << "\",\"type\":\"packet_transmitted\",\"protocol\":\"rudp\",\"time\":" << nowSec
+        << ",\"seq_id\":" << seq
+        << ",\"packet_id\":" << seq
+        << ",\"retry\":" << m_retryCount
+        << ",\"is_retransmit\":" << (m_retryCount > 0 ? "true" : "false")
+        << ",\"pkt_type\":\"" << (m_retryCount > 0 ? "Retransmit" : "Data") << "\""
+        << ",\"payload_len\":" << len
+        << ",\"data_preview\":" << (len > 0 ? PreviewToJsonArray(&m_data[offset], len, 6) : "[]")
+        << ",\"source_node\":0,\"destination_node\":1}";
     if (m_eventCb) m_eventCb(oss.str());
     std::cout << oss.str() << std::endl;
 
@@ -157,8 +182,10 @@ void RudpSenderApplication::OnTimeout(uint32_t seq) {
         std::cout << retryOss.str() << std::endl;
 
         if (seq < m_totalPackets) {
+            m_dataRetransmissions++;
             SendPacket(seq);
         } else {
+            m_finRetransmissions++;
             SendFin();
         }
     } else {
@@ -347,8 +374,12 @@ void RudpReceiverApplication::HandleRead(ns3::Ptr<ns3::Socket> socket) {
                 std::ostringstream oss;
                 oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
                     << "\",\"type\":\"packet_received\",\"protocol\":\"rudp\",\"time\":" << nowSec
-                    << ",\"seq_id\":" << seq << ",\"payload_len\":" << pLen
-                    << ",\"duplicate\":false}";
+                    << ",\"seq_id\":" << seq
+                    << ",\"packet_id\":" << seq
+                    << ",\"payload_len\":" << pLen
+                    << ",\"duplicate\":false,\"pkt_type\":\"Data\""
+                    << ",\"data_preview\":" << (pLen > 0 ? PreviewToJsonArray(payload.data(), pLen, 6) : "[]")
+                    << ",\"source_node\":0,\"destination_node\":1}";
                 if (m_eventCb) m_eventCb(oss.str());
                 std::cout << oss.str() << std::endl;
 
@@ -357,12 +388,20 @@ void RudpReceiverApplication::HandleRead(ns3::Ptr<ns3::Socket> socket) {
             } else if (seq < m_expectedSeq) {
                 // Duplicate packet already received
                 m_duplicateCount++;
+                std::vector<uint8_t> payload(pLen);
+                if (pLen > 0) {
+                    packet->CopyData(payload.data(), pLen);
+                }
 
                 std::ostringstream oss;
                 oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
                     << "\",\"type\":\"packet_received\",\"protocol\":\"rudp\",\"time\":" << nowSec
-                    << ",\"seq_id\":" << seq << ",\"payload_len\":" << pLen
-                    << ",\"duplicate\":true}";
+                    << ",\"seq_id\":" << seq
+                    << ",\"packet_id\":" << seq
+                    << ",\"payload_len\":" << pLen
+                    << ",\"duplicate\":true,\"pkt_type\":\"Duplicate\""
+                    << ",\"data_preview\":" << (pLen > 0 ? PreviewToJsonArray(payload.data(), pLen, 6) : "[]")
+                    << ",\"source_node\":0,\"destination_node\":1}";
                 if (m_eventCb) m_eventCb(oss.str());
                 std::cout << oss.str() << std::endl;
 
@@ -376,6 +415,17 @@ void RudpReceiverApplication::HandleRead(ns3::Ptr<ns3::Socket> socket) {
             if (!m_finished) {
                 m_finished = true;
                 std::string hash = sha256_bytes(m_receivedData.data(), m_receivedData.size());
+
+                std::ostringstream reconOss;
+                reconOss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
+                         << "\",\"type\":\"reconstruction_progress\",\"protocol\":\"rudp\",\"time\":" << nowSec
+                         << ",\"recovered_blocks\":" << m_uniqueDataReceived
+                         << ",\"total_blocks\":" << m_uniqueDataReceived
+                         << ",\"pct\":100"
+                         << ",\"bytes_reconstructed\":" << m_receivedData.size()
+                         << "}";
+                if (m_eventCb) m_eventCb(reconOss.str());
+                std::cout << reconOss.str() << std::endl;
 
                 std::ostringstream oss;
                 oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
@@ -410,7 +460,9 @@ void RudpReceiverApplication::SendAck(uint32_t seq, ns3::Address from) {
     std::ostringstream oss;
     oss << "EVENT_JSON:{\"transfer_id\":\"" << m_transferId
         << "\",\"type\":\"ack_sent\",\"protocol\":\"rudp\",\"time\":" << nowSec
-        << ",\"ack_seq\":" << seq << "}";
+        << ",\"seq_id\":" << seq
+        << ",\"ack_seq\":" << seq
+        << ",\"source_node\":1,\"destination_node\":0}";
     if (m_eventCb) m_eventCb(oss.str());
     std::cout << oss.str() << std::endl;
 }
